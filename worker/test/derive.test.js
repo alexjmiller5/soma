@@ -977,3 +977,13 @@ test("refresh is bounded: no-data proofs after no_data_refresh_days, value proof
   age();
   expect(await sweep(db, { DERIVATIONS: JSON.stringify(endpoints) }, { fetchImpl: s.fetchImpl })).toEqual({ derived: 0, failed: [] });
 });
+
+test("one table's backlog cannot take every later table's share of a sweep", async () => {
+  const { db, env, fetchImpl } = await tracks(2);
+  db.db.exec("CREATE TABLE zz (id TEXT PRIMARY KEY, isrc TEXT, label TEXT, created_at TEXT, updated_at TEXT, deleted_at TEXT, hub_at TEXT)");
+  db.db.exec(`INSERT INTO catalog_properties (id, tbl, col, sort, type, derived_by, inputs) VALUES ('zz.label','zz','label',1,'text','http:isrc','["isrc"]')`);
+  db.db.exec("INSERT INTO zz (id, isrc, updated_at) VALUES ('z1', 'ISRCz', '2026-01-01T00:00:00.000Z')");
+  const out = await sweep(db, env, { fetchImpl: async (url, init) => JSON.parse(init.body).tbl === "zz" ? Response.json({ label: "v" }) : fetchImpl(url, init) });
+  expect(out.failed.some((f) => f.id && f.id.startsWith("t"))).toBe(true); // tracks still has a backlog
+  expect(db.db.query("SELECT label FROM zz").get().label).toBe("v");
+});

@@ -451,7 +451,7 @@ reads never provision either store or rewrite saved definitions.
   work in failed; subsequent calls/sweeps resume. A derivation starts only while
   the remaining budget covers the costliest one so far, so an external call is
   never made for a commit that cannot fit; freshness is judged in bulk (two
-  reads per 100 rows, one rendering per distinct input list). SQL text is bounded at D1's 100KB limit. Typed history uses bounded trigger bodies, keeping each cell's evidence sequence intact and all triggers in the same mutation transaction. Ordinary 500-row writes use bulk
+  reads per 200 rows, one rendering per distinct input list). SQL text is bounded at D1's 100KB limit. Typed history uses bounded trigger bodies, keeping each cell's evidence sequence intact and all triggers in the same mutation transaction. Ordinary 500-row writes use bulk
   upserts. Budget exhaustion is retryable per row; sync leaves its push cursor
   unchanged whenever any row rejects. Core and Python sync re-push
   `write-budget` and `retryable` rows in halved batches within the round, so
@@ -946,8 +946,9 @@ whose `updated_at` is at or past a proof's `produced_at` (inclusive: same-millis
 edits count); hashes decide freshness. The sweep pages candidates in id order and re-hashes them, passing rows found
 fresh; each table resumes after the id stored in `_derivation_cursors` (hub-owned
 operational state like the cooldowns), held back at the first row left
-unattempted (budget, limit, cooldown), so no row hides the rows after it. Scans
-share half the budget evenly across tables. A scan that runs out of its share,
+unattempted (budget, limit, cooldown), so no row hides the rows after it. Each
+table gets an equal share of what is left of the budget, at most half of it for
+scanning, so one table's backlog cannot starve the tables after it. A scan that runs out of its share,
 and rows past a call's limit or budget, are reported in `failed`, never dropped.
 
 Manual record Resolve uses `POST /v1/derive/resolve` with exactly one `ids`

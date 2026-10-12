@@ -107,13 +107,16 @@ const UNSCANNED = "derivation sweep budget reached before the end of this table;
 const waiting = (f) => f.error === PENDING || f.error === LIMITED || /deferred by cooldown/.test(f.error);
 // provenance.detail of a lookup that completed without data for its column.
 const NO_DATA = '{"no_data":true}';
+const NO_DATA_DAYS = 7;
 const DAY_MS = 86_400_000;
+// Rows judged per freshness read pair, and per sweep page.
+const CHUNK = 200;
 
 export function loadDerivations(env) {
   if (!env?.DERIVATIONS) return new Map();
   const obj = JSON.parse(env.DERIVATIONS);
   return new Map(Object.entries(obj).map(([k, v]) => [k, {
-    url: v.url, headers: v.headers ?? {}, refreshDays: v.refresh_days ?? null, noDataDays: v.no_data_refresh_days ?? 7,
+    url: v.url, headers: v.headers ?? {}, refreshDays: v.refresh_days ?? null, noDataDays: v.no_data_refresh_days ?? NO_DATA_DAYS,
   }]));
 }
 
@@ -123,7 +126,7 @@ function refreshCutoffs(env, byName) {
   const derivations = loadDerivations(env), now = Date.now();
   const cutoff = (days) => (days == null ? "" : new Date(now - days * DAY_MS).toISOString());
   return new Map([...byName.keys()].map((name) => {
-    const { refreshDays = null, noDataDays = 7 } = derivations.get(name) ?? {};
+    const { refreshDays = null, noDataDays = NO_DATA_DAYS } = derivations.get(name) ?? {};
     return [name, { value: cutoff(refreshDays), noData: cutoff(noDataDays) }];
   }));
 }
@@ -158,7 +161,8 @@ function dependencyOrder(byName) {
   return { order, deps };
 }
 
-export async function deriveRows(db, env, table, ids, { fetchImpl = fetch, names = null, col = null, expectedUpdatedAt } = {}) {
+// `floor`: statements left untouched for the caller's later work.
+export async function deriveRows(db, env, table, ids, { fetchImpl = fetch, names = null, col = null, expectedUpdatedAt, floor = 0 } = {}) {
   db = queryBudget(db, 900);
   const t = ident(table);
   const derivations = loadDerivations(env);
@@ -186,7 +190,7 @@ export async function deriveRows(db, env, table, ids, { fetchImpl = fetch, names
       if (col && !cols.some((p) => p.col === col)) continue;
 
       const start = db.remaining();
-      if (start < (reserve || 60 + 2 * cols.length)) {
+      if (start - floor < Math.max(reserve, 60 + 2 * cols.length)) {
         out.failed.push({ id, col: cols[0].col, error: PENDING });
         continue;
       }
@@ -339,10 +343,10 @@ async function staleWork(db, t, typeOf, byName, ids, cutoffs) {
   const lists = [...new Set(props.map((p) => JSON.stringify(p.inputs ?? [])))];
   const array = (render, list) => `json_array(${JSON.parse(list).map((c) => render(`t.${qident(c)}`, typeOf[c])).join(", ") || "NULL"})`;
   const work = [];
-  for (let i = 0; i < ids.length; i += 100) {
+  for (let i = 0; i < ids.length; i += CHUNK) {
     const { results: rows } = await db.prepare(`SELECT t.id, ${lists.map((list, j) => `${array(canonicalSql, list)} AS "c${j}", ${array(legacySql, list)} AS "l${j}"`).join(", ")}
       FROM ${qident(t)} t WHERE t.deleted_at IS NULL AND t.id IN (SELECT value FROM json_each(?)) ORDER BY t.id`)
-      .bind(JSON.stringify(ids.slice(i, i + 100))).all();
+      .bind(JSON.stringify(ids.slice(i, i + CHUNK))).all();
     const { results: proofs } = await db.prepare("SELECT id, inputs_hash, produced_at, detail FROM provenance WHERE deleted_at IS NULL AND id IN (SELECT value FROM json_each(?))")
       .bind(JSON.stringify(rows.flatMap((row) => props.map((p) => `${t}:${row.id}:${p.col}`)))).all();
     const proven = new Map(proofs.map((p) => [p.id, p]));
@@ -363,7 +367,7 @@ async function staleWork(db, t, typeOf, byName, ids, cutoffs) {
 // `limit` per derivation; the rest is reported pending, never dropped silently.
 // After a derivation commits, the rows it touched are judged afresh for every
 // derivation reading its outputs: their proofs may have just gone stale.
-async function deriveWork(db, env, t, typeOf, byName, stale, { fetchImpl, limit, cutoffs }) {
+async function deriveWork(db, env, t, typeOf, byName, stale, { fetchImpl, limit, cutoffs, floor = 0 }) {
   const out = { derived: 0, failed: [] };
   const { order, deps } = dependencyOrder(byName);
   const work = new Map(stale);
@@ -372,12 +376,19 @@ async function deriveWork(db, env, t, typeOf, byName, stale, { fetchImpl, limit,
     const ids = [...work].filter(([, names]) => names.includes(name)).map(([id]) => id);
     for (const id of ids.slice(limit)) out.failed.push({ id, col: cols[0].col, error: LIMITED });
     if (!ids.length) continue;
-    const r = await deriveRows(db, env, t, ids.slice(0, limit), { fetchImpl, names: new Set([name]) });
+    const taken = ids.slice(0, limit);
+    const r = await deriveRows(db, env, t, taken, { fetchImpl, names: new Set([name]), floor });
     out.derived += r.derived;
     out.failed.push(...r.failed);
-    if (order.slice(i + 1).some((later) => deps.get(later).has(name))) {
-      const again = new Map(await staleWork(db, t, typeOf, byName, ids.slice(0, limit), cutoffs));
-      for (const id of ids.slice(0, limit)) work.set(id, again.get(id) ?? []);
+    const readers = order.slice(i + 1).filter((later) => deps.get(later).has(name));
+    if (!readers.length) continue;
+    try {
+      const again = new Map(await staleWork(db, t, typeOf, byName, taken, cutoffs));
+      for (const id of taken) work.set(id, again.get(id) ?? []);
+    } catch (e) {
+      if (!String(e).includes("life_write_budget")) throw e;
+      // Unjudged readers count as stale: attempted or reported pending, never skipped.
+      for (const id of taken) work.set(id, [...new Set([...work.get(id), ...readers])]);
     }
   }
   return out;
@@ -417,9 +428,10 @@ async function candidates(db, t, byName, cutoffs, after, limit) {
 }
 
 // Each table resumes where its last sweep stopped, so rows found fresh (or
-// failing on every attempt) never hide the rows after them. The scans share
-// half the budget evenly across tables; derivations get the rest.
-export async function sweep(db, env, { limit = 50, fetchImpl = fetch, page = 200 } = {}) {
+// failing on every attempt) never hide the rows after them. Each table gets an
+// equal share of what is left of the budget, at most half of it for scanning;
+// what it does not use passes to the tables after it.
+export async function sweep(db, env, { limit = 50, fetchImpl = fetch, page = CHUNK } = {}) {
   db = queryBudget(db,900);
   const out = { derived: 0, failed: [] };
   const catalog = await db
@@ -432,13 +444,12 @@ export async function sweep(db, env, { limit = 50, fetchImpl = fetch, page = 200
   if (!tables?.length) return out;
   await db.prepare(CURSORS).run();
   const cursors = new Map(((await db.prepare("SELECT tbl, after FROM _derivation_cursors").all()).results ?? []).map((r) => [r.tbl, r.after]));
-  const floor = Math.floor(db.remaining() / 2);
   for (const [i, { tbl }] of tables.entries()) {
     try {
       const t = ident(tbl);
       const { typeOf, byName } = await derivationProps(db, t);
       const cutoffs = refreshCutoffs(env, byName);
-      const stopAt = db.remaining() - Math.max(0, db.remaining() - floor) / (tables.length - i);
+      const share = db.remaining() / (tables.length - i), floor = db.remaining() - share, stopAt = floor + share / 2;
       const start = cursors.get(t) ?? "", seen = [start], stale = [];
       let after = start, end = false;
       while (stale.length < limit && db.remaining() - 3 >= stopAt) {
@@ -454,7 +465,7 @@ export async function sweep(db, env, { limit = 50, fetchImpl = fetch, page = 200
         if (end) break;
       }
       if (!end && stale.length < limit) out.failed.push({ table: t, id: null, col: null, error: UNSCANNED });
-      const r = await deriveWork(db, env, t, typeOf, byName, stale, { fetchImpl, limit, cutoffs });
+      const r = await deriveWork(db, env, t, typeOf, byName, stale, { fetchImpl, limit, cutoffs, floor });
       out.derived += r.derived;
       out.failed.push(...r.failed);
       // Resume at the first row left unattempted, else past every row handled.
