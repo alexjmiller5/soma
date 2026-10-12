@@ -53,10 +53,22 @@ test('version 2 grouped and relative definitions round-trip without persisting a
   expect(reopened.view).toEqual({table:'items',groups:definition.groups,filters:definition.filters});
   await expect(core.readRows(db,reopened.view!)).rejects.toThrow(/calendar/i);
   const before=await db.all('SELECT * FROM views');
-  for(const bad of [{...definition,calendar:{today:'2026-03-08'}},{...definition,timeZone:undefined},{...definition,version:1}]){
+  for(const bad of [{...definition,calendar:{today:'2026-03-08'}},{...definition,version:1}]){
     await expect(save(db,{table:'items',name:'Invalid',definition:bad})).rejects.toThrow();
   }
   expect(await db.all('SELECT * FROM views')).toEqual(before);
+});
+
+test('a relative view without a timezone saves and reopens to follow the reading device',async()=>{
+  const db=await local();
+  await db.run('ALTER TABLE items ADD COLUMN due TEXT');
+  await db.run("INSERT INTO catalog_properties(id,tbl,col,type) VALUES ('items.due','items','due','date')");
+  const definition:core.SavedViewDefinition={version:2,dayStartMinutes:180,filters:[{column:'due',op:'lte',relative:'today'}]};
+  const saved=await save(db,{table:'items',name:'Device day',definition});
+  expect(saved.unavailable).toBeNull();expect(saved.definition).toEqual(definition);
+  const reopened=(await list(db)).views[0];
+  expect(reopened.unavailable).toBeNull();expect(reopened.definition).toEqual(definition);
+  await expect(core.readRows(db,reopened.view!)).rejects.toThrow(/calendar/i);
 });
 
 test('version 2 query extensions remain unavailable to version 1 definitions',async()=>{

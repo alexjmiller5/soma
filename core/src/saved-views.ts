@@ -1,4 +1,4 @@
-import type { Catalog, ResolveViewDefinitionArgs, ResolvedViewDefinition, DeleteViewArgs, ListViewsArgs, SaveViewArgs, SavedViewDefinition, SavedViewList, SavedViewRecord, View } from './contract.generated.ts';
+import type { CalendarPolicy, Catalog, ResolveViewDefinitionArgs, ResolvedViewDefinition, DeleteViewArgs, ListViewsArgs, SaveViewArgs, SavedViewDefinition, SavedViewList, SavedViewRecord, View } from './contract.generated.ts';
 import type { SqlDriver } from './driver.ts';
 import { readCatalog } from './catalog.ts';
 import { qident, type Row } from './validate.ts';
@@ -100,7 +100,6 @@ async function definitionView(db: SqlDriver, catalog: Catalog, table: string, va
     if (timeZone!==undefined && (typeof timeZone!=='string' || timeZone.length>100 || !/^[A-Za-z_]+(?:\/[A-Za-z0-9_+.-]+)*$/.test(timeZone))) throw new Error('Invalid saved-view timezone.');
     if (dayStartMinutes!==undefined && (typeof dayStartMinutes!=='number' || !Number.isInteger(dayStartMinutes)
       || dayStartMinutes<0 || dayStartMinutes>1439)) throw new Error('Invalid saved-view day boundary.');
-    if (filters.some(f=>f.relative!==undefined) && timeZone===undefined) throw new Error('Relative saved views require a timezone.');
     if (view.columns && new Set(view.columns).size !== view.columns.length) throw new Error('Duplicate saved-view columns.');
     referenced = [...(view.columns ?? []), ...filters.map(f => f.column), ...(view.sort ?? []).map(s => s.column)];
     referenced.push(...validateRowActions(value,catalog,table));
@@ -160,6 +159,13 @@ export async function resolveViewDefinition(db: SqlDriver, args: ResolveViewDefi
 }
 
 /** Internal action lookup; the caller holds the writer transaction. */
+/** The host calendar a saved view needs: its pinned zone, or the reading device's zone when it has none. */
+export function calendarPolicy(definition: SavedViewDefinition): CalendarPolicy | null {
+  const relative=[...(definition.filters ?? []),...(definition.groups ?? []).flatMap(g=>g.filters)].some(f=>f.relative!==undefined);
+  if (definition.version!==2 || (!definition.timeZone && !relative)) return null;
+  return {...(definition.timeZone ? {timeZone:definition.timeZone} : {}),dayStartMinutes:definition.dayStartMinutes ?? 0};
+}
+
 export async function loadSavedView(db: SqlDriver, id: string): Promise<SavedViewRecord> {
   const catalog=await readCatalog(db),problem=await storageProblem(db,catalog);
   if(problem)throw new Error(problem);

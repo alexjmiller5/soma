@@ -98,6 +98,19 @@ test('workspace/replica identity and calendar policy are explicit, selected view
   await expect(core.prepareReadPlan(db,{...input,expectedViewUpdatedAt:'2026-01-02T00:00:00.000Z'})).rejects.toThrow(/changed|revision/i);
 });
 
+test('a relative view without a timezone publishes a device-zone calendar policy',async()=>{
+  const db=await fixture();
+  await db.run('INSERT INTO views(id,name,tbl,definition,updated_at) VALUES (?,?,?,?,?)',['device-view','Device fixture','items',JSON.stringify({version:2,dayStartMinutes:180,filters:[{column:'due',op:'lte',relative:'today'}]}),T0]);
+  const plan=await core.prepareReadPlan(db,{...args,viewID:'device-view',expectedViewUpdatedAt:T0});
+  expect(plan.calendarPolicy).toEqual({dayStartMinutes:180});
+});
+
+test('a view with no timezone and no relative filter needs no calendar policy',async()=>{
+  const db=await fixture();
+  await db.run('INSERT INTO views(id,name,tbl,definition,updated_at) VALUES (?,?,?,?,?)',['plain-view','Plain fixture','items',JSON.stringify({version:2,dayStartMinutes:180}),T0]);
+  expect((await core.prepareReadPlan(db,{...args,viewID:'plain-view',expectedViewUpdatedAt:T0})).calendarPolicy).toBeNull();
+});
+
 test('nonempty FTS is rejected without draining any queue or changing the database',async()=>{
   const db=await fixture(),input=await saved(db,[],{search:'title'});
   const before=await db.all('SELECT name,sql FROM sqlite_master ORDER BY name');

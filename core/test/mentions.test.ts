@@ -146,6 +146,19 @@ test('relative view embeds ask the host for its calendar context before reading 
   expect(embed.columns[0]).toEqual({ column: 'name', label: 'Name', type: 'text' });
 });
 
+test('a relative view embed without a timezone asks the host for its own zone', async () => {
+  const db = await local();
+  await db.run('ALTER TABLE items ADD COLUMN due TEXT');
+  await db.run("INSERT INTO catalog_properties(id,tbl,col,type) VALUES ('items.due','items','due','date')");
+  await db.run("INSERT INTO items(id,name,due,updated_at) VALUES ('a','Today item','2026-03-01',?),('b','Later','2026-04-01',?)", [T0, T0]);
+  const saved = await handlers(db).saveView({ table: 'items', name: 'Due here', definition: {
+    version: 2, dayStartMinutes: 180, filters: [{ column: 'due', op: 'lte', relative: 'today' }] } });
+  expect(await handlers(db).viewEmbed({ table: 'items', viewId: saved.id })).toEqual({
+    name: 'Due here', columns: [], rows: [], more: false, calendar: { dayStartMinutes: 180 } });
+  const calendar = { today: '2026-03-01', start: '2026-03-01T08:00:00.000Z', end: '2026-03-02T08:00:00.000Z' };
+  expect((await handlers(db).viewEmbed({ table: 'items', viewId: saved.id, calendar })).rows.map((r: any) => r.label)).toEqual(['Today item']);
+});
+
 test('iris links resolve to exact live records and saved views through the source-link resolver', async () => {
   const db = await local();
   const saved = await handlers(db).saveView({ table: 'items', name: 'All', definition: { version: 1 } });

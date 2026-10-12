@@ -2,7 +2,7 @@ import type { MentionLabel, MentionLabelsArgs, MentionedByArgs, MentionedByPage,
 import type { SqlDriver } from './driver.ts';
 import { readCatalog } from './catalog.ts';
 import { openSearchIndex, searchIndexing } from './search.ts';
-import { loadSavedView } from './saved-views.ts';
+import { calendarPolicy, loadSavedView } from './saved-views.ts';
 import { syncStatus } from './status.ts';
 import { qident } from './validate.ts';
 import { compileView, displayName } from './view.ts';
@@ -105,8 +105,8 @@ export async function viewEmbed(db: SqlDriver, args: ViewEmbedArgs): Promise<Vie
     if (saved.tbl !== args.table) return unavailable('This saved view is no longer available.');
     if (!saved.view || !saved.definition) return unavailable(saved.unavailable ?? 'This saved view cannot be read.');
     const definition = saved.definition;
-    if (definition.timeZone && !args.calendar)
-      return { name: saved.name, columns: [], rows: [], more: false, calendar: { timeZone: definition.timeZone, dayStartMinutes: definition.dayStartMinutes ?? 0 } };
+    const policy = calendarPolicy(definition);
+    if (policy && !args.calendar) return { name: saved.name, columns: [], rows: [], more: false, calendar: policy };
     const catalog = await readCatalog(db);
     const display = catalog.tables.find(t => t.id === args.table)?.display;
     const properties = catalog.properties.filter(p => p.tbl === args.table);

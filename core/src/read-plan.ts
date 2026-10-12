@@ -1,7 +1,7 @@
 import type { PrepareReadPlanArgs, ReadPlan, ReadPlanGuard, View } from './contract.generated.ts';
 import type { SqlDriver, Value } from './driver.ts';
 import { readCatalog } from './catalog.ts';
-import { loadSavedView } from './saved-views.ts';
+import { calendarPolicy, loadSavedView } from './saved-views.ts';
 import { compileReadQuery } from './view.ts';
 import { qident, validEditTimestamp } from './validate.ts';
 
@@ -50,7 +50,7 @@ export async function prepareReadPlan(db: SqlDriver, value: PrepareReadPlanArgs)
       if (selected.id!==args.viewID || selected.tbl!==args.table || selected.updated_at!==args.expectedViewUpdatedAt) throw new Error('Selected view revision or target changed');
       if (!selected.view || !selected.definition || selected.unavailable) throw new Error(selected.unavailable ?? 'Saved view unavailable');
       view=selected.view; viewUpdatedAt=selected.updated_at;
-      if (selected.definition.version===2 && selected.definition.timeZone) policy={timeZone:selected.definition.timeZone,dayStartMinutes:selected.definition.dayStartMinutes??0};
+      policy=calendarPolicy(selected.definition);
     }
     const projection=args.kind==='count'?['id']:[...new Set(['id',...(display?[display]:[])])];
     const query=compileReadQuery({...view,columns:projection},catalog.properties,args.kind);

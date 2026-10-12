@@ -252,8 +252,11 @@ reads never provision either store or rewrite saved definitions.
   No coverage, count or snapshot guarantee follows from browsing; usage caps
   still apply and core never retries. The bridge contract owns both operations.
 - `core/src/view.ts` compiles bounded AND/OR groups, runtime Today operands and
-  option-rank sorting. Version 2 saved definitions retain timezone, groups and
-  optional `dayStartMinutes` (integer 0..1439, absent means midnight). Hosts
+  option-rank sorting. Version 2 saved definitions retain groups, an optional
+  timezone (absent means the reading device's current zone) and optional
+  `dayStartMinutes` (integer 0..1439, absent means midnight). `calendarPolicy`
+  is the one rule for which views need a host calendar; its `timeZone` is
+  omitted when the host should use its own zone. Hosts
   supply consecutive local policy boundaries on each query, never persist the
   calendar, and refresh at the boundary/resume. Resolve a DST gap to the next
   valid local instant and a repeated boundary to its first occurrence. The

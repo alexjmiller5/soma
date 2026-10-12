@@ -5042,7 +5042,6 @@
         }
       },
       "required": [
-        "timeZone",
         "dayStartMinutes"
       ]
     },
@@ -5687,7 +5686,6 @@
         }
       },
       "required": [
-        "timeZone",
         "dayStartMinutes"
       ]
     },

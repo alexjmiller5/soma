@@ -485,9 +485,9 @@ properties keep their narrower validation. Nullability follows the property.
 
 `{column, op: "lte", relative: "today"}` compares a date, datetime or date_or_datetime with
 the current local day. Relative filters also support `eq`, `ne`, `lt`, `gt`
-and `gte`, and cannot include `value`. The saved definition retains `timeZone`
-and optional `dayStartMinutes` (integer 0 through 1439, omitted means midnight).
-The host resolves that policy and supplies runtime `calendar: {today, start, end}`.
+and `gte`, and cannot include `value`. The saved definition retains an optional `timeZone`
+(omitted means the reading device's current zone) and optional `dayStartMinutes`
+(integer 0 through 1439, omitted means midnight). The host resolves that policy and supplies runtime `calendar: {today, start, end}`.
 `today` labels the civil date on which the current policy interval began;
 the bounds are consecutive configured local boundaries expressed as exact UTC
 millisecond timestamps, with an exclusive end. For a boundary in a daylight-saving
