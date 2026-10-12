@@ -1167,6 +1167,9 @@ consumer reads them, never in this repo.
 | Reflex | profile `reflex-v2` | Reflex ENV |
 | Birthdays, Circle, Strava Sync | profiles `birthdays-reader-v1`, `birthdays-editor-v1`, `circle-reader`, `strava-sync-v1` | each app's own storage |
 | Flighty Sync, Page Archiver, Shared Album Reminders, Media Center YouTube offline, Bookmark Mirror, Birthdays task writer, Calendar Feeds, OwnTracks phone, People Sync files | pattern C exact operator tokens (`flighty-sync`, Page Archiver's, `shared-album-reminders-mini-v2`, `media-center-youtube-offline`, `bookmark-mirror-macbook`, `birthdays-task-writer`, `calendar-feeds-*` (minted by its `scripts/provision.py`), `phone`, `people-sync-files`); each moves to a profile at its next rotation | each consumer's native secure storage or settings |
+| soma CLI replicas (one per Mac), Iris (one per device) | browser device enrollment (`soma login`), `full` | device Keychain |
+| People Sync communication import | operator token `people-sync-comm` (`full`: `/batch` and `archive query` admit only `full`) | People Sync operator env |
+| Find My friend-location collector | exact operator token `friend-location-collector` (`streams:append:friend_city_checks`) | the mini's login Keychain |
 
 ## Durable change recording
 
