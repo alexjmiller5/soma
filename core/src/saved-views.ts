@@ -90,9 +90,9 @@ async function definitionView(db: SqlDriver, catalog: Catalog, table: string, va
   try {
     object(value);
     if (value.version !== 1 && value.version !== 2) throw new Error('Unsupported saved-view definition version.');
-    object(value, ['version', 'columns', 'filters', 'sort', 'search', 'trash', 'widths', ...(value.version===2?['groups','timeZone','dayStartMinutes','actions','layout','presentation']:[])]);
+    object(value, ['version', 'columns', 'filters', 'sort', 'search', 'trash', 'widths', ...(value.version===2?['groups','timeZone','dayStartMinutes','actions','layout','presentation','wrap']:[])]);
     if (!catalog.tables.some(t => t.id === table)) throw new Error('Saved-view target is absent from the catalog.');
-    const { version, widths, timeZone, dayStartMinutes, actions: _actions, layout: _layout, presentation, ...query } = value;
+    const { version, widths, wrap, timeZone, dayStartMinutes, actions: _actions, layout: _layout, presentation, ...query } = value;
     view = { table, ...query } as View;
     validateView(view, catalog.properties);
     const filters=[...(view.filters ?? []),...(view.groups ?? []).flatMap(g=>g.filters)];
@@ -111,6 +111,12 @@ async function definitionView(db: SqlDriver, catalog: Catalog, table: string, va
         compileView({ table, columns: [column] }, catalog.properties);
         referenced.push(column);
       }
+    }
+    // Presentation only: the columns whose cells wrap instead of truncating.
+    if (wrap !== undefined) {
+      if (!Array.isArray(wrap) || wrap.some(c => typeof c !== 'string') || new Set(wrap).size !== wrap.length) throw new Error('Invalid saved-view wrapped columns.');
+      for (const column of wrap as string[]) compileView({ table, columns: [column] }, catalog.properties);
+      referenced.push(...wrap as string[]);
     }
   } catch (error) {
     throw new UnavailableView(error instanceof Error ? error.message : 'Invalid saved-view definition.');

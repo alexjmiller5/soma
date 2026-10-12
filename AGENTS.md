@@ -24,6 +24,10 @@ rows; they do not bypass query pagination or write records. Calendar hosts provi
 civil-day bounds through the existing timezone/day-boundary contract. Date-only
 range ends are inclusive and timed range ends exclusive. Unknown Board select
 values remain visible after configured options, followed by the empty column.
+An optional v2 `wrap` lists distinct catalogued columns whose cells wrap their full
+text (absent: none wrap); like `widths` it is presentation only and never reaches the
+query view, and a wrapped column missing from the catalog or schema makes the view
+unavailable.
 
 Per-table preferred-view IDs use the canonical `view-defaults/v1` manifest and
 `getViewDefault`/`setViewDefault` operations. Writes require the displayed revision

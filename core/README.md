@@ -126,7 +126,9 @@ source imports no platform modules. Inject a `SqlDriver` and a `Hub`.
   a setup error; core never provisions, adopts or repairs it automatically.
 - Saved definitions are `{ version: 1, columns?, filters?, sort?, search?,
   trash?, widths? }`. Columns must be distinct; widths map known columns to
-  positive finite numbers. Filters/sorting/search use the existing core view
+  positive finite numbers. Version 2 adds groups, timezone, day boundary, row
+  actions, layout, presentation and `wrap` (distinct known columns whose cells
+  wrap; absent means none wrap). Filters/sorting/search use the existing core view
   compiler. No table name, pagination, default selection or private device
   preferences are stored in the JSON. The default remains a transient
   All records view using catalog columns.

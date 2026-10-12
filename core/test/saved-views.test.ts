@@ -271,6 +271,25 @@ test.each([
   expect((await core.syncStatus(db)).pendingUiEdits).toBe(0);
 });
 
+test('version 2 wrap lists the columns whose cells wrap; absent means none wrap', async () => {
+  const db = await local();
+  const wrapped: core.SavedViewDefinition = { version: 2, columns: ['name','qty'], wrap: ['name'] };
+  const saved = await save(db, { table: 'items', name: 'Wrapped', definition: wrapped });
+  expect(saved.unavailable).toBeNull();
+  expect((await list(db)).views[0].definition).toEqual(wrapped);
+  // Wrapping is presentation only: the query view carries no wrap field.
+  expect((await list(db)).views[0].view).toEqual({ table: 'items', columns: ['name','qty'] });
+  const before = await db.all('SELECT * FROM views');
+  for (const bad of [
+    { version: 1, wrap: ['name'] }, { version: 2, wrap: 'name' }, { version: 2, wrap: [3] },
+    { version: 2, wrap: ['name','name'] }, { version: 2, wrap: ['missing'] }, { version: 2, wrap: { name: true } },
+  ]) await expect(save(db, { table: 'items', name: 'Invalid', definition: bad })).rejects.toThrow();
+  expect(await db.all('SELECT * FROM views')).toEqual(before);
+  await db.run('ALTER TABLE items DROP COLUMN qty');
+  await insert(db, 'removed', { version: 2, wrap: ['qty'] });
+  expect((await list(db)).views.find((v: core.SavedViewRecord) => v.id === 'removed')?.unavailable).toBeTruthy();
+});
+
 test('removed physical columns and missing target tables disable a view even before catalog repair', async () => {
   const db = await local();
   await insert(db, 'a', definition);

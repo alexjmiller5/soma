@@ -1124,6 +1124,13 @@
         },
         "presentation": {
           "$ref": "#/$defs/ViewPresentation"
+        },
+        "wrap": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Version 2 presentation: distinct catalogued columns whose cells wrap their full text. Omitted means no column wraps."
         }
       },
       "required": [
