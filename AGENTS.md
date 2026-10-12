@@ -803,8 +803,9 @@ named stream, capture, `rows:create` (current policy revision only), file-prefix
 Column patch grants require same-column and id/updated_at/hub_at reads, exclude
 lifecycle fields, and never authorize push/insert or caller-supplied history.
 The deploy workflow pushes `ENROLLMENT_PROFILES`, `ROW_CREATION_POLICIES` and
-`CAPTURE_ADAPTERS` (JSON, `{}` when unused) from the project's ENV item on every
-deploy; edit the item and redeploy, never `wrangler secret put` by hand. One Worker secret is
+`CAPTURE_ADAPTERS` (JSON, `{}` when unused) from the project's ENV item, and
+`DERIVATIONS` from the "Soma Hub Derivations Config" item, on every deploy; edit
+the item and redeploy, never `wrangler secret put` by hand. One Worker secret is
 capped at 5.1 kB, so the deploy step sends `ENROLLMENT_PROFILES` as
 `gzip:<base64>`; the Worker accepts either form and bounds decompression.
 Requested unknown profiles never fall back to full. Auth storage binds
@@ -928,7 +929,10 @@ upstream responses) is stored first in `ARCHIVE` at
 `raw/derivations/<name>/<sha256 of its JSON>.json` and cited as `"raw"` in
 every proof `detail` of that call; an invalid `_raw`, a missing bucket or a
 failed write fails the row with nothing written. No-data checks parse
-`detail` JSON (`no_data` true), never compare its text. A 2xx object is a completed lookup: each derived
+`detail` JSON (`no_data` true), never compare its text. On a wide table (songs)
+one derivation writing about nine columns exceeds a D1 limit in the guarded
+batch (`Expression tree is too large` / `integer overflow`); keep a derivation
+to five columns or fewer there, adding another name for the same endpoint. A 2xx object is a completed lookup: each derived
 column it omits gets a no-data proof (`detail` `{"no_data":true}`, `value_hash`
 of the value left in place, which is never cleared), so a no-match stops being
 retried every sweep. No-data proofs refresh after `no_data_refresh_days`

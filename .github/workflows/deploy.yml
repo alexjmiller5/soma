@@ -48,11 +48,12 @@ jobs:
           ROW_CREATION_POLICIES: op://Soma/Soma ENV/ROW_CREATION_POLICIES
           BACKUP_API_TOKEN: op://Soma/Soma ENV/BACKUP_API_TOKEN
           CAPTURE_ADAPTERS: op://Soma/Soma ENV/CAPTURE_ADAPTERS
+          DERIVATIONS: op://Soma/Soma Hub Derivations Config/DERIVATIONS
       # Every deploy pushes these from the ENV item, so the vault is the source of truth.
       # ENROLLMENT_PROFILES travels gzip-compressed: one secret is capped at 5.1 kB.
       - name: Sync service secrets
         working-directory: worker
         run: |
-          bun -e 'const names=["APNS_CONFIG","APNS_PRIVATE_KEY","ENROLLMENT_PROFILES","ROW_CREATION_POLICIES","BACKUP_API_TOKEN","CAPTURE_ADAPTERS"];const v=Object.fromEntries(names.map(n=>[n,process.env[n]]));v.ENROLLMENT_PROFILES="gzip:"+Buffer.from(Bun.gzipSync(v.ENROLLMENT_PROFILES)).toString("base64");process.stdout.write(JSON.stringify(v))' | bunx wrangler@4 secret bulk
+          bun -e 'const names=["APNS_CONFIG","APNS_PRIVATE_KEY","ENROLLMENT_PROFILES","ROW_CREATION_POLICIES","BACKUP_API_TOKEN","CAPTURE_ADAPTERS","DERIVATIONS"];const v=Object.fromEntries(names.map(n=>[n,process.env[n]]));v.ENROLLMENT_PROFILES="gzip:"+Buffer.from(Bun.gzipSync(v.ENROLLMENT_PROFILES)).toString("base64");process.stdout.write(JSON.stringify(v))' | bunx wrangler@4 secret bulk
       - working-directory: worker
         run: bunx wrangler@4 deploy

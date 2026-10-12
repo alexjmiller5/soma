@@ -1,4 +1,5 @@
-"""In-memory SQLite with D1's length/parameter/compound-SELECT limits, driven by JSON lines."""
+"""In-memory SQLite with D1's length/parameter/compound-SELECT/expression-depth limits,
+driven by JSON lines."""
 
 import json
 import sqlite3
@@ -10,6 +11,7 @@ db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 2_000_000)
 db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 99)
 db.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, 100_000)
 db.setlimit(sqlite3.SQLITE_LIMIT_COMPOUND_SELECT, 5)
+db.setlimit(sqlite3.SQLITE_LIMIT_EXPR_DEPTH, 100)
 
 
 # D1 binds every JavaScript number as a REAL; JSON hands Python integers.
