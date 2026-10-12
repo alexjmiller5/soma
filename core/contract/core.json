@@ -1061,6 +1061,105 @@
         "done"
       ]
     },
+    "SearchExclusion": {
+      "type": "string",
+      "enum": [
+        "provenance",
+        "size"
+      ],
+      "description": "Why the index leaves a table out by default: provenance edges repeat other rows' identities; size means more rows than the sync size rule allows."
+    },
+    "SearchTable": {
+      "type": "object",
+      "description": "A catalogued table with text properties the search index can hold. rows: records, from sync's hub counts when stored, else counted locally. textBytes: estimated bytes of text its index entries hold, from a sample of rows.",
+      "properties": {
+        "table": {
+          "type": "string"
+        },
+        "indexed": {
+          "type": "boolean",
+          "description": "Whether the index holds (or is building) this table's entries now."
+        },
+        "defaultExclusion": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SearchExclusion"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Null when the table is indexed by default."
+        },
+        "override": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "This device's choice: true indexes it anyway, false leaves it out, null follows the default."
+        },
+        "rows": {
+          "$ref": "#/$defs/Count"
+        },
+        "textBytes": {
+          "$ref": "#/$defs/Count"
+        }
+      },
+      "required": [
+        "table",
+        "indexed",
+        "defaultExclusion",
+        "override",
+        "rows",
+        "textBytes"
+      ]
+    },
+    "SearchTableList": {
+      "type": "object",
+      "description": "sizeLimit: rows above which a table is left out by default (the sync size rule).",
+      "properties": {
+        "tables": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SearchTable"
+          }
+        },
+        "sizeLimit": {
+          "$ref": "#/$defs/Count"
+        }
+      },
+      "required": [
+        "tables",
+        "sizeLimit"
+      ]
+    },
+    "SetSearchTableArgs": {
+      "type": "object",
+      "properties": {
+        "table": {
+          "type": "string"
+        },
+        "indexed": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "true or false overrides the default for this table; null returns it to the default."
+        }
+      },
+      "required": [
+        "table",
+        "indexed"
+      ]
+    },
     "SavedViewDefinition": {
       "type": "object",
       "properties": {
@@ -5867,6 +5966,24 @@
         "$ref": "#/$defs/SearchIndexStatus"
       },
       "description": "Builds and maintains the local search and backlink index in one bounded transaction: indexes rows changed since the last call, backfills newly indexed tables and removes tables that left it. Provenance and tables over the sync size rule are skipped unless `_core_state` key `search_tables` opts them in. Search and backlinks never build the index themselves."
+    },
+    "searchTables": {
+      "args": {
+        "$ref": "#/$defs/EmptyArgs"
+      },
+      "result": {
+        "$ref": "#/$defs/SearchTableList"
+      },
+      "description": "Read-only: every table the search index can hold, whether it is indexed and why, its records and an estimate of its text, for a host's settings. Never builds or reconciles the index."
+    },
+    "setSearchTable": {
+      "args": {
+        "$ref": "#/$defs/SetSearchTableArgs"
+      },
+      "result": {
+        "$ref": "#/$defs/SearchTableList"
+      },
+      "description": "Stores this device's choice for one table in `_core_state` `search_tables` and returns the updated list. Hosts then schedule `searchIndexStep`, which backfills a table that joined the index and removes the entries of one that left it."
     },
     "listViews": {
       "args": {

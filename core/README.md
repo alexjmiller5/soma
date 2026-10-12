@@ -264,6 +264,15 @@ index. The `_core_state` key `search_tables` (`SEARCH_TABLES_KEY`)
 holds a JSON object of table to `true` (index it anyway) or `false` (leave it
 out); an unreadable value counts as absent. Sizes are judged when
 reconciliation runs, which hub count refreshes and setting edits trigger.
+Hosts never write that key: `searchTables` lists every table the index can hold
+(catalogued, `id` key, `deleted_at`, text properties) with `indexed`, the
+`defaultExclusion` (`provenance` or `size`), this device's `override`, `rows`
+(hub count, else counted locally) and `textBytes` (indexed text estimated from
+its first 100 rows), and `setSearchTable({table, indexed})` stores `true`/`false`
+or clears the choice with `null` (a choice can be made only for a listed table)
+and returns the updated list; the host then schedules the index step, which
+backfills a table that joined and purges one that left. The setting is local
+plumbing, per device, never synced.
 
 Index-only schema changes keep every local proof: the search stamp and table
 fingerprints ignore indexes (version 2 fingerprints, which listed them, still

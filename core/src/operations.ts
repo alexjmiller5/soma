@@ -19,7 +19,7 @@ import { enrollmentApproval, validateDeviceSession, enrollmentPollResult, sessio
 import { sync } from './sync.ts';
 import { syncStatus } from './status.ts';
 import { readRejections } from './rejections.ts';
-import { openSearchIndex, search, searchIndexStep } from './search.ts';
+import { openSearchIndex, search, searchIndexStep, searchTables, setSearchTable } from './search.ts';
 import { readRemoteRows, readRemoteRow } from './remote.ts';
 import { resolveDerived } from './resolve-derived.ts';
 import { listViews, saveView, deleteView, resolveViewDefinition } from './saved-views.ts';
@@ -85,6 +85,8 @@ export function createCoreHandlers(db: SqlDriver, hub: (endpoint: string) => Ser
     remoteRow: ({ endpoint, ...args }) => readRemoteRow(db, hub(endpoint), args),
     search: args => search(db, args),
     searchIndexStep: args => searchIndexStep(db, args),
+    searchTables: args => searchTables(db, args),
+    setSearchTable: args => setSearchTable(db, args),
     listViews: args => listViews(db, args),
     resolveViewDefinition: args => resolveViewDefinition(db, args),
     getRelatedViewDefault: args => getRelatedViewDefault(db,args),

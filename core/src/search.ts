@@ -1,4 +1,4 @@
-import type { Catalog, SearchArgs, SearchHit, SearchIndexStatus, SearchIndexStepArgs } from './contract.generated.ts';
+import type { Catalog, EmptyArgs, SearchArgs, SearchHit, SearchIndexStatus, SearchIndexStepArgs, SearchTable, SearchTableList, SetSearchTableArgs } from './contract.generated.ts';
 import type { SqlDriver } from './driver.ts';
 import { catalogRevisionSQL, readCatalog } from './catalog.ts';
 import { qident, type Row } from './validate.ts';
@@ -435,6 +435,58 @@ export async function searchIndexStep(db: SqlDriver, args: SearchIndexStepArgs =
     // Triggers a walk installed are the index's own schema change: record them as reconciled.
     if (context.armed) await db.run(`UPDATE _core_search_state SET fingerprint=${await searchStampSQL(db)} WHERE tbl=?`, [READY]);
     return indexStatus(db);
+  });
+}
+
+/** Sums of indexed text bytes over a sample of each table's first rows by primary key. */
+const SAMPLE_ROWS = 100;
+const textSize = (t: IndexedTable) => t.columns.map(col => `ifnull(length(CAST(s.${qident(col)} AS BLOB)),0)`).join('+');
+
+/** For a host's settings: every table the index can hold, whether it does and why, its records
+ * and an estimate of its text. It only reads; the index step applies any change. */
+export async function searchTables(db: SqlDriver, args: EmptyArgs = {}): Promise<SearchTableList> {
+  if (!args || typeof args !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(args)) || Object.keys(args).length) throw new Error('Invalid search table arguments.');
+  return db.transaction(() => listSearchTables(db));
+}
+async function listSearchTables(db: SqlDriver): Promise<SearchTableList> {
+  const { candidates } = await candidateTables(db);
+  const { counts, chosen } = await searchSettings(db);
+  const rows = new Map<string, number>(), averages = new Map<string, number>();
+  for (const t of candidates) if (Number.isSafeInteger(counts[t.table])) rows.set(t.table, counts[t.table] as number);
+  // A few statements for the whole catalog: each crosses a host bridge.
+  for (let i = 0; i < candidates.length; i += 100) {
+    const sql = candidates.slice(i, i + 100).map(t => `SELECT ${literal(t.table)} AS tbl,${rows.has(t.table) ? 'NULL' : `(SELECT count(*) FROM ${qident(t.table)})`} AS n,
+      (SELECT ifnull(avg(n),0) FROM (SELECT ${textSize(t)} AS n FROM ${qident(t.table)} AS s ORDER BY s.id LIMIT ${SAMPLE_ROWS})) AS avg`).join(' UNION ALL ');
+    for (const row of await db.all(sql)) {
+      if (row.n !== null) rows.set(String(row.tbl), Number(row.n));
+      averages.set(String(row.tbl), Number(row.avg));
+    }
+  }
+  const tables = candidates.map((t): SearchTable => {
+    const n = rows.get(t.table) ?? 0;
+    const defaultExclusion = UNSEARCHED.has(t.table) ? 'provenance' : n > SEARCH_MAX_ROWS ? 'size' : null;
+    const override = typeof chosen[t.table] === 'boolean' ? chosen[t.table] as boolean : null;
+    return { table: t.table, indexed: override ?? !defaultExclusion, defaultExclusion, override, rows: n, textBytes: Math.round(n * (averages.get(t.table) ?? 0)) };
+  });
+  return { tables, sizeLimit: SEARCH_MAX_ROWS };
+}
+
+/** Stores this device's choice for one table: true indexes it whatever its default, false leaves it
+ * out, null returns it to the default. The next index step backfills or purges it. */
+export async function setSearchTable(db: SqlDriver, args: SetSearchTableArgs): Promise<SearchTableList> {
+  if (!args || typeof args !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(args))
+    || Object.keys(args).some(k => k !== 'table' && k !== 'indexed') || typeof args.table !== 'string'
+    || !(typeof args.indexed === 'boolean' || args.indexed === null)) throw new Error('Invalid search table arguments.');
+  const { table, indexed } = args;
+  return db.transaction(async () => {
+    // A choice for a table that is gone can be cleared, never made.
+    if (indexed !== null && !(await candidateTables(db)).candidates.some(t => t.table === table)) throw new Error('This search table is not in the catalog or has no text to index.');
+    await db.run('CREATE TABLE IF NOT EXISTS _core_state (key TEXT PRIMARY KEY, value TEXT)');
+    const { chosen } = await searchSettings(db);
+    if (indexed === null) delete chosen[table]; else chosen[table] = indexed;
+    if (Object.keys(chosen).length) await db.run('INSERT INTO _core_state(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', [SEARCH_TABLES_KEY, JSON.stringify(chosen)]);
+    else await db.run('DELETE FROM _core_state WHERE key=?', [SEARCH_TABLES_KEY]);
+    return listSearchTables(db);
   });
 }
 

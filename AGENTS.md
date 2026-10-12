@@ -229,7 +229,8 @@ reads never provision either store or rewrite saved definitions.
   including independent Python edits. Only `searchIndexStep` builds the index,
   in budgeted, resumable chunks hosts run after rounds, writes and while idle;
   reads never build it (they index at most one queued batch once it is current). Provenance and size-rule tables are left out unless
-  `_core_state` `search_tables` opts them in. Index-only schema changes re-index nothing (stamp and fingerprints
+  `_core_state` `search_tables` opts them in; hosts change it only through `searchTables`/`setSearchTable`
+  (per-device, never synced). Index-only schema changes re-index nothing (stamp and fingerprints
   ignore indexes), so a query index on a large table is state the operator adds with `soma sql`.
   Cache DDL never enters `_schema_log`. `View.search`
   uses literal word prefixes; `contains` retains substring semantics. Raw

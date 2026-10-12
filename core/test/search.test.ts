@@ -817,3 +817,59 @@ test('fingerprints written before indexes were ignored keep a table indexed afte
   await db.run("UPDATE catalog_properties SET type='text' WHERE col='qty'");
   expect(await ids(db, '42')).toEqual(['a']);
 });
+
+test('searchTables lists every searchable table: indexed or not, why, records and text to index', async () => {
+  const { db } = await local();
+  await core.initCore(db);
+  await table(db, 'provenance', 3);
+  await table(db, 'big', 4);
+  await table(db, 'unstated', core.SEARCH_MAX_ROWS + 1);
+  // No text property: nothing to index, so nothing to choose.
+  await db.run('CREATE TABLE counts (id TEXT PRIMARY KEY, n INTEGER, deleted_at TEXT)');
+  await db.run("INSERT INTO catalog_tables(id) VALUES ('counts')");
+  await db.run("INSERT INTO catalog_properties(id,tbl,col,type) VALUES ('counts.n','counts','n','int')");
+  await db.run("INSERT INTO _core_state(key,value) VALUES ('hub_stats',?)", [JSON.stringify({ at: T0, tables: { items: 1, provenance: 3, big: core.SEARCH_MAX_ROWS + 1 } })]);
+  const bytes = (text: string) => new TextEncoder().encode(text).length;
+  expect(await core.searchTables(db, {})).toEqual({ sizeLimit: core.SEARCH_MAX_ROWS, tables: [
+    // The hub's count decides the size rule when sync stored one; text is estimated from a sample.
+    { table: 'big', indexed: false, defaultExclusion: 'size', override: null, rows: core.SEARCH_MAX_ROWS + 1, textBytes: 6 * (core.SEARCH_MAX_ROWS + 1) },
+    { table: 'items', indexed: true, defaultExclusion: null, override: null, rows: 1, textBytes: bytes('Café field guide') + bytes('# Offline\n\n**Searching** with [links](https://example.test) and `code`.') },
+    { table: 'provenance', indexed: false, defaultExclusion: 'provenance', override: null, rows: 3, textBytes: 18 },
+    { table: 'unstated', indexed: false, defaultExclusion: 'size', override: null, rows: core.SEARCH_MAX_ROWS + 1, textBytes: 6 * (core.SEARCH_MAX_ROWS + 1) },
+  ] });
+  // Listing reads; it never builds or reconciles the index.
+  expect(await db.all("SELECT name FROM sqlite_master WHERE name GLOB '_core_search_*'")).toEqual([]);
+}, 30_000);
+
+test('setSearchTable opts one table in or out, or back to its default, and the step follows', async () => {
+  const { db } = await local();
+  await core.initCore(db);
+  await db.run("UPDATE items SET name='needle'");
+  await table(db, 'provenance', 3);
+  const tables = async () => [...new Set((await search(db, { text: 'needle', limit: 200 })).map(h => h.table))].sort();
+  expect(await tables()).toEqual(['items']);
+  const opted = await core.setSearchTable(db, { table: 'provenance', indexed: true });
+  expect(opted.tables.find(t => t.table === 'provenance')).toMatchObject({ indexed: true, defaultExclusion: 'provenance', override: true });
+  expect(await tables()).toEqual(['items', 'provenance']);
+  expect((await core.setSearchTable(db, { table: 'items', indexed: false })).tables.find(t => t.table === 'items'))
+    .toMatchObject({ indexed: false, defaultExclusion: null, override: false });
+  expect(await tables()).toEqual(['provenance']);
+  expect(await docs(db, 'items')).toBe(0);
+  expect(JSON.parse((await db.all('SELECT value FROM _core_state WHERE key=?', [core.SEARCH_TABLES_KEY]))[0].value as string)).toEqual({ provenance: true, items: false });
+  // Clearing returns a table to its default; an emptied setting leaves no row behind.
+  await core.setSearchTable(db, { table: 'provenance', indexed: null });
+  expect((await core.setSearchTable(db, { table: 'items', indexed: null })).tables.map(t => [t.table, t.indexed, t.override]))
+    .toEqual([['items', true, null], ['provenance', false, null]]);
+  expect(await db.all('SELECT value FROM _core_state WHERE key=?', [core.SEARCH_TABLES_KEY])).toEqual([]);
+  expect(await tables()).toEqual(['items']);
+  // A stale choice for a table that is gone can still be cleared, but never set.
+  await db.run('INSERT INTO _core_state(key,value) VALUES (?,?)', [core.SEARCH_TABLES_KEY, '{"gone":true}']);
+  await core.setSearchTable(db, { table: 'gone', indexed: null });
+  expect(await db.all('SELECT value FROM _core_state WHERE key=?', [core.SEARCH_TABLES_KEY])).toEqual([]);
+  for (const args of [{ table: 'gone', indexed: true }, { table: 'items' }, { table: 'items', indexed: 'yes' }, { table: 1, indexed: true }, { table: 'items', indexed: true, extra: 1 }]) {
+    await expect(core.setSearchTable(db, args as never)).rejects.toThrow(/search table/i);
+  }
+  // An unreadable setting is replaced rather than blocking the choice.
+  await db.run('INSERT INTO _core_state(key,value) VALUES (?,?)', [core.SEARCH_TABLES_KEY, 'not json']);
+  expect((await core.setSearchTable(db, { table: 'items', indexed: false })).tables.find(t => t.table === 'items')?.override).toBe(false);
+});
