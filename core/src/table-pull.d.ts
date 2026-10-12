@@ -1,5 +1,5 @@
 export type PullState = { v: 1; endpoint: string; tables: Record<string, { columns: string; since: string; n: number }> } | null | undefined;
-export type TableChanges = { full: boolean; rows: Array<Record<string, unknown> & { id: string }>; deleted: string[] };
+export type TableChanges = { full: boolean; rows: Array<Record<string, unknown> & { id: string }>; deleted: string[]; tombstones: Array<Record<string, unknown> & { id: string }> };
 type Options = {
   endpoint: string;
   token: string;

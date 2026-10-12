@@ -81,7 +81,13 @@ def test_first_round_is_full_and_a_quiet_round_is_one_cursor_request():
     assert hub.routes == ["/v1/cursor", "/v1/rows/pull"]
     hub.routes.clear()
     quiet = pull(hub, first["state"])
-    assert (quiet["full"], quiet["rows"], quiet["deleted"], quiet["requests"]) == (False, [], [], 1)
+    assert (quiet["full"], quiet["rows"], quiet["deleted"], quiet["tombstones"], quiet["requests"]) == (
+        False,
+        [],
+        [],
+        [],
+        1,
+    )
     assert quiet["state"] == first["state"]
 
 
@@ -97,6 +103,10 @@ def test_later_rounds_return_arrivals_and_tombstones():
     assert round_["full"] is False
     assert [(r["id"], r["title"]) for r in round_["rows"]] == [("a", "A2"), ("c", "C")]
     assert round_["deleted"] == ["b"]
+    # A consumer that keeps deleted rows (to recognize them later) gets their columns too.
+    assert [(r["id"], r["title"], r["deleted_at"]) for r in round_["tombstones"]] == [
+        ("b", "B", at(4))
+    ]
 
 
 def test_a_late_commit_on_the_mark_is_fetched_next_round():
@@ -132,7 +142,7 @@ def test_tables_share_requests_pages_walk_and_empty_tables_stay_quiet():
     tables = {"bookmarks": COLUMNS, "notes": ["id", "body"]}
     first = pull_tables("https://hub.test", "token", tables, None, post=hub.post)
     assert len(first["changes"]["bookmarks"]["rows"]) == 5
-    assert first["changes"]["notes"] == {"full": True, "rows": [], "deleted": []}
+    assert first["changes"]["notes"] == {"full": True, "rows": [], "deleted": [], "tombstones": []}
     # Two tables share the 4-row budget; once notes is done bookmarks gets all of it.
     assert hub.routes == ["/v1/cursor", "/v1/rows/pull", "/v1/rows/pull"]
     hub.routes.clear()

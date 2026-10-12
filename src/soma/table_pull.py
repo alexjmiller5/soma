@@ -5,7 +5,9 @@ round, then only tables whose mark moved, pulled from the held cursor
 (`hub_at >= since`) in batches. Standard library only, so consumers vendor
 this one file. The caller stores `state` (small JSON) between rounds and
 applies each table's changes: `full` replaces its copy with `rows`; otherwise
-upsert `rows` and drop the `deleted` ids. Contract: docs/consumer-access.md.
+upsert `rows` and drop the `deleted` ids (`tombstones` carries those rows'
+pulled columns for a consumer that keeps deleted rows). Contract:
+docs/consumer-access.md.
 """
 
 import json
@@ -99,7 +101,7 @@ def pull_tables(endpoint, token, tables, state, *, post=None, headers=None):
             and since == mark
             and (mark == "" or (marks.get("at_mark") or {}).get(t) == prior["n"])
         ):
-            changes[t] = {"full": False, "rows": [], "deleted": []}
+            changes[t] = {"full": False, "rows": [], "deleted": [], "tombstones": []}
             nxt[t] = prior
         else:
             walks.append(
@@ -153,10 +155,12 @@ def pull_tables(endpoint, token, tables, state, *, post=None, headers=None):
         open_ = [w for w in open_ if not w["done"]]
 
     for w in walks:
+        tombstones = [r for r in w["rows"] if r.get("deleted_at") is not None]
         changes[w["t"]] = {
             "full": w["since"] == "",
             "rows": [r for r in w["rows"] if r.get("deleted_at") is None],
-            "deleted": [r["id"] for r in w["rows"] if r.get("deleted_at") is not None],
+            "deleted": [r["id"] for r in tombstones],
+            "tombstones": tombstones,
         }
         nxt[w["t"]] = {
             "columns": w["key"],

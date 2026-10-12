@@ -50,7 +50,7 @@ test('the first round pulls the whole table in one batch; a quiet round is one c
   expect(routes).toEqual(['/v1/cursor', '/v1/rows/pull']);
   routes.length = 0;
   const quiet = await pullTable({ ...options, table: 'bookmarks', columns, state: first.state });
-  expect(quiet).toMatchObject({ full: false, rows: [], deleted: [] });
+  expect(quiet).toMatchObject({ full: false, rows: [], deleted: [], tombstones: [] });
   expect(routes).toEqual(['/v1/cursor']);
   // State is plain JSON, so a consumer can store it anywhere.
   expect(JSON.parse(JSON.stringify(quiet.state))).toEqual(first.state);
@@ -69,6 +69,8 @@ test('later rounds return only arrivals, with tombstones as deleted ids', async 
   expect(round.full).toBe(false);
   expect(round.rows.map(r => [r.id, r.title])).toEqual([['a', 'A2'], ['c', 'C']]);
   expect(round.deleted).toEqual(['b']);
+  // A consumer that keeps deleted rows (to recognize them later) gets their columns too.
+  expect(round.tombstones.map(r => [r.id, r.title, r.deleted_at])).toEqual([['b', 'B', at(4)]]);
   expect(routes).toEqual(['/v1/cursor', '/v1/rows/pull']);
 });
 
@@ -106,7 +108,7 @@ test('many tables share one cursor request and one batch; an empty table stays q
   const tables = { bookmarks: columns, notes: ['id', 'body'] };
   const first = await pullTables({ ...options, tables, state: null });
   expect(Object.keys(first.changes)).toEqual(['bookmarks', 'notes']);
-  expect(first.changes.notes).toEqual({ full: true, rows: [], deleted: [] });
+  expect(first.changes.notes).toEqual({ full: true, rows: [], deleted: [], tombstones: [] });
   expect(routes).toEqual(['/v1/cursor', '/v1/rows/pull']);
   routes.length = 0;
   put('notes', 'n', { body: 'hello' }, at(9));

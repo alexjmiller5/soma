@@ -94,7 +94,8 @@ const { full, rows, deleted, state } = await pullTable({ endpoint, token, table:
   Object, a Modal Volume, a state file), written only after the consumer has
   applied the changes. Losing it costs one full pull.
 - **Every pull carries `id`, `hub_at` and `deleted_at`**; the helper adds them.
-  A tombstone arrives as a `deleted` id.
+  A tombstone arrives as a `deleted` id, and as a row with its pulled columns in
+  `tombstones` for a consumer that keeps deleted rows.
 - **Resets.** Another endpoint, another column list, or a mark behind the held
   cursor (a replaced or restored table, a purged newest row) pulls that table
   in full. A schema change that rewrites existing values in place needs the

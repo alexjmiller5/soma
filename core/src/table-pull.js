@@ -3,7 +3,9 @@
 // mark moved, pulled from the held cursor (`hub_at >= since`) in batches.
 // Dependency-free on purpose: consumers vendor this one file. The caller keeps
 // `state` (small JSON) between rounds and applies each table's changes:
-// `full` replaces its copy with `rows`; otherwise upsert `rows`, drop `deleted`.
+// `full` replaces its copy with `rows`; otherwise upsert `rows`, drop `deleted`
+// (`tombstones` carries those rows' pulled columns, for a consumer that keeps
+// deleted rows).
 // soma: core/src/table-pull.js, docs/consumer-access.md "Reading a table repeatedly".
 
 const MARK = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
@@ -43,7 +45,7 @@ export async function pullTables({ endpoint, token, tables, state, fetch: send =
     // Inclusive pulls re-read the mark; it is quiet while the hub holds as
     // many rows at the mark as we received there.
     if (prior && since === mark && (mark === '' || marks.at_mark?.[t] === prior.n)) {
-      changes[t] = { full: false, rows: [], deleted: [] };
+      changes[t] = { full: false, rows: [], deleted: [], tombstones: [] };
       next[t] = prior;
     } else walks.push({ t, key, since, mark, rows: [], after: undefined });
   }
@@ -64,7 +66,8 @@ export async function pullTables({ endpoint, token, tables, state, fetch: send =
   }
 
   for (const w of walks) {
-    changes[w.t] = { full: w.since === '', rows: w.rows.filter(r => r.deleted_at == null), deleted: w.rows.filter(r => r.deleted_at != null).map(r => r.id) };
+    const tombstones = w.rows.filter(r => r.deleted_at != null);
+    changes[w.t] = { full: w.since === '', rows: w.rows.filter(r => r.deleted_at == null), deleted: tombstones.map(r => r.id), tombstones };
     next[w.t] = { columns: w.key, since: w.mark, n: w.rows.filter(r => r.hub_at === w.mark).length };
   }
   return { changes, state: { v: 1, endpoint: base, tables: next }, requests };
