@@ -942,8 +942,9 @@ provenance and history remain unchanged on endpoint failures.
 Safe source-prefixed error text is preserved. Transport failures retain
 `TimeoutError`/`timeout` or `unreachable` during fetch and body consumption
 so callers can classify outages; only JSON syntax errors are invalid JSON.
-Redaction includes full configured headers and authentication components,
-plus URL userinfo and query values in raw and decoded forms.
+Redaction includes full configured headers and authentication components
+(a Basic credential's decoded user and password too), plus URL userinfo and
+query values in raw and decoded forms.
 429 and 503 `Retry-After` values accept integer seconds or an HTTP date;
 returned `retry_after` is a positive integer (at least one second). Missing
 or invalid 429 hints default to 60 seconds; 503 without a valid hint has no

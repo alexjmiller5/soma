@@ -55,7 +55,17 @@ async function endpointError(res, target) {
     if (typeof detail !== "string" || /[<>]/.test(detail)) return "";
     const secrets = [target.url, ...Object.values(target.headers)];
     for (const [header, value] of Object.entries(target.headers)) {
-      if (/^(?:proxy-)?authorization$/i.test(header)) secrets.push(value.match(/^\s*\S+\s+(.+?)\s*$/)?.[1]);
+      if (!/^(?:proxy-)?authorization$/i.test(header)) continue;
+      const [, scheme, token] = value.match(/^\s*(\S+)\s+(.+?)\s*$/) ?? [];
+      secrets.push(token);
+      // An upstream can echo the decoded user or password rather than the token.
+      if (/^basic$/i.test(scheme ?? "")) {
+        try {
+          const decoded = new TextDecoder().decode(Uint8Array.from(atob(token), (c) => c.charCodeAt(0)));
+          const colon = decoded.indexOf(":");
+          secrets.push(decoded, ...(colon < 0 ? [] : [decoded.slice(0, colon), decoded.slice(colon + 1)]));
+        } catch { /* not base64: the raw token is already redacted */ }
+      }
     }
     const url = new URL(target.url);
     secrets.push(...url.search.slice(1).split("&").map(part => part.split("=").slice(1).join("=")));

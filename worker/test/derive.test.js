@@ -695,3 +695,16 @@ test('manual Resolve route requires an explicit single-row revision and rejects 
   expect(result.derived).toBe(0);
   expect(result.failed[0].error).toContain('changed');
 });
+
+test("endpoint diagnostics redact the decoded components of a configured Basic credential", async () => {
+  const db = await fresh();
+  // No URL userinfo here, so only decoding the header can find these values.
+  const target = { url: "https://derivations.example/movie", headers: { Authorization: `Basic ${btoa("basic-user:basic-secret-77")}` } };
+  for (const echo of ["basic-secret-77", "basic-user", "basic-user:basic-secret-77"]) {
+    const out = await deriveRows(db, { DERIVATIONS: JSON.stringify({ tmdb_movie: target }) }, "movies", ["78"], {
+      fetchImpl: async () => Response.json({ error: `source: Rejected ${echo} here` }, { status: 401 }),
+    });
+    expect(out.failed[0].error).toContain("source: Rejected");
+    expect(out.failed[0].error).not.toMatch(/basic-user|basic-secret/);
+  }
+});
