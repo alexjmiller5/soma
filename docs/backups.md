@@ -36,7 +36,7 @@ version 1. `soma export` and `exportReplica` write
 `INSERT INTO ... VALUES(...)` rows, then indexes, triggers and views, then
 `COMMIT;`. D1 exports have no transaction lines and spell newlines as
 `replace('a\nb','\n',char(10))`. Any of them imports into a fresh database
-with `sqlite3 <dir>/soma.db < dump.sql`, which `SOMA_DATA_DIR=<dir> life ...`
+with `sqlite3 <dir>/soma.db < dump.sql`, which `SOMA_DATA_DIR=<dir> soma ...`
 then reads.
 
 `exportReplica` writes the schema log and every ordinary table; device sync
