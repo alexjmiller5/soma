@@ -693,6 +693,31 @@ def test_sync_pushes_catalog_and_provenance_before_data(db, hub, monkeypatch):
     assert order.index("catalog_properties") < order.index("people")
 
 
+def test_sync_pushes_rows_before_rows_whose_invariants_need_them(db, hub):
+    from soma.catalog import set_rule
+
+    # Name order would push overlay first, and the hub's invariant would
+    # reject it until the next round brought its transaction.
+    create_table(db, "txns_x", ["amount:int"])
+    create_table(db, "overlay", ["source_id:text"])
+    set_rule(
+        db,
+        "overlay-row-exists",
+        scope="table",
+        tbl="overlay",
+        kind="invariant",
+        enforce=1,
+        text="An overlay points at a live transaction.",
+        sql="SELECT c.id FROM changed c WHERE NOT EXISTS "
+        "(SELECT 1 FROM txns_x t WHERE t.id = c.source_id AND t.deleted_at IS NULL)",
+    )
+    sync(db, hub)
+    insert_rows(db, "txns_x", [{"id": "t1", "amount": 5}])
+    insert_rows(db, "overlay", [{"source_id": "t1"}])
+    assert sync(db, hub)["rejected"] == []
+    assert [r["source_id"] for r in hub.rows_pull("overlay", ["source_id"], "")] == ["t1"]
+
+
 def test_fresh_replica_pulls_schema_and_rows_without_echoing(db, hub, tmp_path):
     _mk_people(db, ["Ada", "Grace"])
     sync(db, hub)

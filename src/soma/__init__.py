@@ -1253,6 +1253,36 @@ def _user_tables(path: Path, conn: sqlite3.Connection | None = None) -> list[str
     return sorted(first) + sorted(n for n in names if n not in first)
 
 
+def _push_order(conn: sqlite3.Connection, tables: list[str]) -> list[str]:
+    """Each table after the tables it needs on the hub: its catalog ref targets and
+    the tables its enforced invariants read (overlay after txns_*), so a row and
+    what it points at land in one round. Catalogs and provenance stay first; a
+    cycle falls back to name order, as core's sync does."""
+    first = [t for t in tables if t.startswith("catalog_") or t == "provenance"]
+    needs = {t: set() for t in tables if t not in first}
+    if "catalog_properties" in tables:
+        for tbl, target in conn.execute(
+            "SELECT tbl, ref_table FROM catalog_properties WHERE deleted_at IS NULL "
+            "AND type IN ('ref', 'multi_ref') AND ref_table IS NOT NULL"
+        ):
+            if tbl in needs and target in needs:
+                needs[tbl].add(target)
+    if "catalog_rules" in tables:
+        for tbl, sql in conn.execute(
+            "SELECT tbl, sql FROM catalog_rules WHERE deleted_at IS NULL AND scope = 'table' "
+            "AND kind = 'invariant' AND enforce = 1 AND sql IS NOT NULL"
+        ):
+            if tbl in needs:
+                needs[tbl] |= set(re.findall(r"\w+", sql)) & needs.keys()
+    ordered, done, left = [], set(), list(needs)
+    while left:
+        table = next((t for t in left if needs[t] - {t} <= done), left[0])
+        left.remove(table)
+        ordered.append(table)
+        done.add(table)
+    return first + ordered
+
+
 def _apply_local_ddl(path: Path, entry: dict) -> None:
     with connect(path) as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -1410,7 +1440,7 @@ def _sync_locked(path: Path, hub) -> dict:
         ]
         # DDL is a writer too. A table created since schema replay must be
         # included (or fail the round for schema retry), never checkpointed past.
-        tables = _user_tables(path, snapshot)
+        tables = _push_order(snapshot, _user_tables(path, snapshot))
         candidates, columns = {}, {}
         push_cursor = snapshot.execute(f"SELECT {NOW}").fetchone()[0]
         progress = {}
