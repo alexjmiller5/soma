@@ -733,6 +733,27 @@ def test_sync_pushes_rows_after_the_rows_they_reference(db, hub):
     assert [r["id"] for r in hub.rows_pull("a_child", ["id"], "")] == ["c1"]
 
 
+def test_a_deprecated_value_rides_along_with_edits_but_is_never_written(db, hub):
+    from soma.catalog import set_property
+
+    create_table(db, "items", ["name:text", "legacy:bool"])
+    insert_rows(db, "items", [{"id": "kept", "name": "A", "legacy": 1}])
+    sync(db, hub)
+    set_property(db, "items", "legacy", deprecated=1)
+    sync(db, hub)
+    # An edit to another column keeps the preserved value, locally and on the hub.
+    execute_sql(db, "UPDATE items SET name = 'B' WHERE id = 'kept'")
+    assert sync(db, hub)["rejected"] == []
+    assert hub.rows_pull("items", ["id", "name", "legacy"], "") == [
+        {"id": "kept", "name": "B", "legacy": 1}
+    ]
+    with pytest.raises(Exception, match="deprecated"):
+        execute_sql(db, "UPDATE items SET legacy = 0 WHERE id = 'kept'")
+    with pytest.raises(Exception, match="deprecated"):
+        insert_rows(db, "items", [{"id": "new", "name": "C", "legacy": 1}])
+    execute_sql(db, "UPDATE items SET legacy = NULL WHERE id = 'kept'")
+
+
 def test_fresh_replica_pulls_schema_and_rows_without_echoing(db, hub, tmp_path):
     _mk_people(db, ["Ada", "Grace"])
     sync(db, hub)

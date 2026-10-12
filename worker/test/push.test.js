@@ -338,3 +338,24 @@ test('200 provenance edges with schema options and target refs remain one bulk w
   const missing=await ROUTES['/v1/rows/push']({table:'provenance',columns:Object.keys(rows[0]),rows:[{...rows[0],id:'missing-target'}]},db);
   expect(missing.rejected[0].rule).toBe('ref');
 });
+
+test("a preserved deprecated value rides along with whole-row and sparse pushes; writing one is refused", async () => {
+  const db = new D1Shim();
+  await seed(db);
+  for (const sql of [
+    "ALTER TABLE places ADD COLUMN legacy INTEGER",
+    "INSERT INTO catalog_properties (id, tbl, col, type, deprecated) VALUES ('places.legacy','places','legacy','bool',1)",
+    "INSERT INTO places (id, status, name, legacy, updated_at) VALUES ('a','want','A',1,'2026-09-01T00:00:00.000Z')",
+  ]) await db.prepare(sql).run();
+  const push = (columns, rows) => ROUTES["/v1/rows/push"]({ table: "places", columns, rows }, db);
+  const at = (day) => `2026-09-0${day}T00:00:00.000Z`;
+  let out = await push([...cols, "legacy"], [row({ name: "B", legacy: 1, updated_at: at(4) })]);
+  expect(out.rejected).toEqual([]);
+  out = await push(["id", "name", "updated_at"], [{ id: "a", name: "C", updated_at: at(5) }]);
+  expect(out.rejected).toEqual([]);
+  expect(await db.prepare("SELECT name, legacy FROM places WHERE id='a'").first()).toEqual({ name: "C", legacy: 1 });
+  out = await push(["id", "legacy", "updated_at"], [{ id: "a", legacy: 0, updated_at: at(6) }]);
+  expect(out.rejected[0]).toMatchObject({ id: "a", col: "legacy", rule: "deprecated" });
+  out = await push([...cols, "legacy"], [row({ id: "fresh", legacy: 1 })]);
+  expect(out.rejected[0]).toMatchObject({ id: "fresh", col: "legacy", rule: "deprecated" });
+});

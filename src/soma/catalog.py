@@ -555,8 +555,11 @@ def validate_row(
             if p.get("required") and _empty(v):
                 fail(col, "required", f"{label} is required.")
             continue
-        if p.get("deprecated") and not _empty(v):
-            fail(col, "deprecated", f"{col} is deprecated. Never write it.")
+        # Deprecated = kept but hidden: a stored value rides along unjudged; only
+        # a write that sets a new value is refused (clearing one is allowed).
+        if p.get("deprecated"):
+            if changed and not _empty(v):
+                fail(col, "deprecated", f"{col} is deprecated. Never write it.")
             continue
         if p.get("derived_by") and changed and col not in in_derive:
             fail(

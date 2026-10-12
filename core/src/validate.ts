@@ -78,7 +78,9 @@ export function validateRow(
       if (p.required && empty(v)) fail("required", `${label} is required.`);
       continue;
     }
-    if (p.deprecated && !empty(v)) { fail("deprecated", `${col} is deprecated. Never write it.`); continue; }
+    // Deprecated = kept but hidden: a stored value rides along unjudged; only a
+    // write that sets a new value is refused (clearing one is allowed).
+    if (p.deprecated) { if (changed && !empty(v)) fail("deprecated", `${col} is deprecated. Never write it.`); continue; }
     if (p.derived_by && changed && !inDerive.has(col)) { fail("derived", `${col} is derived by ${p.derived_by} on the hub. Never write it.`); continue; }
     if (p.immutable && before != null && changed) { fail("immutable", `${col} is set once and never changed.`); continue; }
     if (p.required && empty(v)) { fail("required", `${label} is required.`); continue; }
