@@ -105,6 +105,14 @@ test("an endpoint without _source_ref leaves the inputs hash as the ref", async 
   expect(p.from_ref).toBe(p.inputs_hash);
 });
 
+test("a derivation without inputs hashes them as [null], as catalog.py does", async () => {
+  const db = await fresh();
+  db.db.exec(`UPDATE catalog_properties SET inputs = '[]' WHERE derived_by = 'http:tmdb_movie'`);
+  await deriveRows(db, ENV, "movies", ["78"], { fetchImpl: stub({ body: { title: "Blade Runner" } }).fetchImpl });
+  const p = await db.prepare("SELECT inputs_hash FROM provenance WHERE id='movies:78:title'").first();
+  expect(p.inputs_hash).toBe(await hex("[null]"));
+});
+
 test("a non-2xx endpoint writes nothing and is reported in failed", async () => {
   const db = await fresh();
   const { fetchImpl } = stub({ status: 500, body: { error: "boom" } });
@@ -707,4 +715,52 @@ test("endpoint diagnostics redact the decoded components of a configured Basic c
     expect(out.failed[0].error).toContain("source: Rejected");
     expect(out.failed[0].error).not.toMatch(/basic-user|basic-secret/);
   }
+});
+
+// An INTEGER input (year) and an INTEGER output (decade): a replica renders a
+// stored 1999 as "1999", so the hub must too, however D1 binds the number.
+async function withYears(db) {
+  await seed(db);
+  for (const sql of [
+    "ALTER TABLE movies ADD COLUMN year INTEGER",
+    "ALTER TABLE movies ADD COLUMN decade INTEGER",
+    "INSERT INTO catalog_properties (id, tbl, col, sort, type) VALUES ('movies.year','movies','year',5,'int')",
+    `INSERT INTO catalog_properties (id, tbl, col, sort, type, derived_by, inputs) VALUES ('movies.decade','movies','decade',6,'int','http:blurb','["year"]')`,
+    "UPDATE movies SET year = 1999 WHERE id = '78'",
+  ]) await db.prepare(sql).run();
+  return db;
+}
+const LEGACY = { inputs: '["1999.0"]', value: "1990.0" }; // what hubs hashed before the typed rendering
+
+test("hub proofs over INTEGER cells match the replica's rendering under D1's REAL binding", async () => {
+  const { LimitedD1 } = await import("./limited-d1.js");
+  const db = new LimitedD1({ realNumbers: true });
+  try {
+    await withYears(db);
+    const out = await deriveRows(db, ENV, "movies", ["78"], { names: new Set(["blurb"]), fetchImpl: stub({ body: { decade: 1990 } }).fetchImpl });
+    expect(out).toEqual({ derived: 1, failed: [] });
+    const p = await db.prepare("SELECT inputs_hash, value_hash FROM provenance WHERE id = 'movies:78:decade'").first();
+    expect(p).toEqual({ inputs_hash: await hex('["1999"]'), value_hash: await hex("1990") });
+  } finally { await db.close(); }
+});
+
+test("proofs hashed in the earlier REAL rendering stay fresh: no re-derive, and a pushed proven value is accepted", async () => {
+  const db = await withYears(new D1Shim());
+  const proof = async (value) => {
+    db.db.exec(`UPDATE movies SET decade = ${value} WHERE id = '78'`);
+    db.db.query(`INSERT OR REPLACE INTO provenance (id, to_kind, to_ref, field, from_kind, from_ref, rel, asserted_by, inputs_hash, value_hash, produced_at)
+      VALUES ('movies:78:decade','movies','78','decade','http:blurb','x','derived_from','hub',?,?,'2026-09-05T00:00:00.000Z')`)
+      .run(await hex(LEGACY.inputs), await hex(LEGACY.value));
+  };
+  await proof(1990);
+  const s = stub({ body: { decade: 2000 } });
+  await deriveStale(db, ENV, "movies", db.db.query("SELECT * FROM movies").all(), { fetchImpl: s.fetchImpl });
+  expect(s.calls.map((c) => c.url)).not.toContain("https://derivations.example/blurb");
+
+  // An external writer that matched the old rendering pushes value and proof.
+  db.db.exec("UPDATE movies SET decade = NULL WHERE id = '78'");
+  const push = await ROUTES["/v1/rows/push"]({ table: "movies", columns: ["id", "decade", "updated_at"],
+    rows: [{ id: "78", decade: 1990, updated_at: "2030-01-01T00:00:00.000Z" }] }, db);
+  expect(push.rejected).toEqual([]);
+  expect(db.db.query("SELECT decade FROM movies WHERE id = '78'").get().decade).toBe(1990);
 });

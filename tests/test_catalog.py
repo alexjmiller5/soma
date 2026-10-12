@@ -901,6 +901,38 @@ def test_inputs_hash_renders_reals_the_way_sqlite_stored_them(db):
         assert value_hash(conn, "orders", "o1", "qty") == hashlib.sha256(b"4.0").hexdigest()
 
 
+def test_int_cells_hash_as_integers_and_earlier_real_proofs_stay_fresh(db):
+    """A replica renders a stored INTEGER 1999 as "1999", like the hub's typed
+    rendering. Hubs used to hash a rebound D1 number as "1999.0"; those proofs
+    must stay fresh and keep admitting their values, not force a re-derive."""
+    import hashlib
+
+    def sha(text):
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    create_table(db, "albums", ["year:int", "decade:int"])
+    set_property(db, "albums", "decade", type="int", derived_by="http:decade", inputs=["year"])
+    insert_rows(db, "albums", [{"id": "a", "year": 1999}])
+    with connect(db) as conn:
+        conn.execute("UPDATE albums SET decade = 1990 WHERE id = 'a'")
+        assert inputs_hash(conn, "albums", "a", ["year"]) == sha('["1999"]')
+        assert value_hash(conn, "albums", "a", "decade") == sha("1990")
+        conn.execute(
+            "INSERT INTO provenance (id, to_kind, to_ref, field, from_kind, from_ref, rel, asserted_by, inputs_hash, value_hash) "
+            "VALUES ('albums:a:decade','albums','a','decade','http:decade','x','derived_from','hub',?,?)",
+            (sha('["1999.0"]'), sha("1990.0")),
+        )
+        conn.commit()
+    assert [f for f in check(db) if f["col"] == "decade"] == []
+    with connect(db) as conn:
+        conn.execute("UPDATE albums SET decade = NULL WHERE id = 'a'")
+        conn.commit()
+        _, rejected = validate_push(conn, "albums", [{"id": "a", "year": 1999, "decade": 1990}])
+    assert rejected == []
+    execute_sql(db, "UPDATE albums SET year = 2001 WHERE id = 'a'")
+    assert ("decade", "stale") in {(f["col"], f["rule"]) for f in check(db)}
+
+
 def test_check_reports_orphan_provenance_after_a_hard_delete(db):
     import sqlite3 as s
 

@@ -1149,31 +1149,69 @@ def run_invariant(conn, rule: dict, changed_ids=None, now=None) -> list[dict]:
 # --- derivations & provenance -------------------------------------------------
 
 
-def cast_text(expr: str, is_number: bool = False) -> str:
-    """How a value is rendered for hashing. SQLite stores a `number` column as
-    REAL, so reading one back gives '4.0'; a bound Python 4 binds as INTEGER
-    and would give '4'. Cast a bound `number` through REAL so every path -
-    client, hub validator, hub derivation engine - agrees byte for byte."""
-    return f"CAST(CAST({expr} AS REAL) AS TEXT)" if is_number else f"CAST({expr} AS TEXT)"
+def canonical_text(expr: str, type_: str | None = None) -> str:
+    """How a value is rendered for hashing, typed by the catalog and identical
+    for a stored column and a bound value (worker/src/validate.js
+    `canonicalSql` mirrors it). The hub's D1 binds every number as a REAL, so a
+    stored INTEGER 1999 comes back to it as 1999.0: a `number` is always REAL
+    text (4 -> '4.0'), every other type renders an integral REAL as an integer
+    ('1999')."""
+    if type_ == "number":
+        return f"CAST(CAST({expr} AS REAL) AS TEXT)"
+    return (
+        f"CASE WHEN typeof({expr}) = 'real' AND {expr} = CAST({expr} AS INTEGER) "
+        f"THEN CAST(CAST({expr} AS INTEGER) AS TEXT) ELSE CAST({expr} AS TEXT) END"
+    )
+
+
+def legacy_text(expr: str, type_: str | None = None) -> str:
+    """The rendering hubs hashed before the typed one: every bound number as
+    REAL text ('1999.0'). Proofs in that form are still accepted, so they stay
+    fresh without re-fetching their providers."""
+    if type_ == "number":
+        return canonical_text(expr, type_)
+    return (
+        f"CASE WHEN typeof({expr}) IN ('integer', 'real') "
+        f"THEN CAST(CAST({expr} AS REAL) AS TEXT) ELSE CAST({expr} AS TEXT) END"
+    )
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _types(conn, tbl: str) -> dict:
+    return {p["col"]: p.get("type") for p in properties(conn, tbl)}
+
+
+def _inputs_hashes(conn, tbl: str, row_id: str, inputs: list[str]) -> tuple[str, str] | None:
+    """(canonical, legacy) hashes of a stored row's inputs; None when the row is
+    gone (hard-deleted out from under its provenance)."""
+    type_of = _types(conn, tbl)
+    texts = [
+        ", ".join(render(qi(c), type_of.get(c)) for c in inputs) or "NULL"
+        for render in (canonical_text, legacy_text)
+    ]
+    row = conn.execute(
+        f"SELECT json_array({texts[0]}), json_array({texts[1]}) FROM {qi(tbl)} WHERE id = ?",
+        (row_id,),
+    ).fetchone()
+    return (_sha(row[0]), _sha(row[1])) if row else None
 
 
 def inputs_hash(conn, tbl: str, row_id: str, inputs: list[str]) -> str | None:
     """Hash the inputs as SQLite renders them, so Python and the hub agree byte
-    for byte. None when the row is gone (hard-deleted out from under its
-    provenance)."""
-    # reading columns: a `number` is already stored as REAL, so no extra cast
-    casts = ", ".join(cast_text(qi(c)) for c in inputs) or "NULL"
-    row = conn.execute(
-        f"SELECT json_array({casts}) FROM {qi(tbl)} WHERE id = ?", (row_id,)
-    ).fetchone()
-    return hashlib.sha256(row[0].encode()).hexdigest() if row else None
+    for byte. None when the row is gone."""
+    hashes = _inputs_hashes(conn, tbl, row_id, inputs)
+    return hashes[0] if hashes else None
 
 
 def value_hash(conn, tbl: str, row_id: str, col: str) -> str | None:
+    text = canonical_text(qi(col), _types(conn, tbl).get(col))
     row = conn.execute(
-        f"SELECT coalesce({cast_text(qi(col))}, '') FROM {qi(tbl)} WHERE id = ?", (row_id,)
+        f"SELECT coalesce({text}, '') FROM {qi(tbl)} WHERE id = ?", (row_id,)
     ).fetchone()
-    return hashlib.sha256(row[0].encode()).hexdigest() if row else None
+    return _sha(row[0]) if row else None
 
 
 def stale(conn) -> list[Violation]:
@@ -1186,7 +1224,7 @@ def stale(conn) -> list[Violation]:
             (p["tbl"], p["col"]),
         ).fetchall()
         for r in rows:
-            h = inputs_hash(conn, p["tbl"], r["row_id"], p.get("inputs") or [])
+            h = _inputs_hashes(conn, p["tbl"], r["row_id"], p.get("inputs") or [])
             if h is None:
                 out.append(
                     Violation(
@@ -1197,7 +1235,7 @@ def stale(conn) -> list[Violation]:
                         "provenance exists for a row that no longer exists",
                     )
                 )
-            elif h != r["inputs_hash"]:
+            elif r["inputs_hash"] not in h:
                 out.append(
                     Violation(
                         p["tbl"],
@@ -1481,24 +1519,26 @@ def validate_push(
                 "SELECT inputs_hash, value_hash FROM provenance WHERE id = ? AND deleted_at IS NULL",
                 (f"{table}:{row['id']}:{col}",),
             ).fetchone()
-            # bound values, not columns: a `number` needs the REAL cast
-            casts = (
-                ", ".join(
-                    cast_text("?", type_of.get(c) == "number") for c in (p.get("inputs") or [])
-                )
-                or "NULL"
-            )
-            text = conn.execute(
-                f"SELECT json_array({casts})", [merged.get(c) for c in (p.get("inputs") or [])]
-            ).fetchone()[0]
-            vtext = conn.execute(
-                f"SELECT coalesce({cast_text('?', p.get('type') == 'number')}, '')",
-                (merged.get(col),),
-            ).fetchone()[0]
+            # bound values, typed like the stored columns; either rendering proves it
+            inputs = p.get("inputs") or []
+            cells = [*inputs, col]
+            arrays = [
+                f"json_array({', '.join(render(f'a{i}', type_of.get(c)) for i, c in enumerate(inputs)) or 'NULL'})"
+                for render in (canonical_text, legacy_text)
+            ]
+            values = [
+                f"coalesce({render(f'a{len(inputs)}', p.get('type'))}, '')"
+                for render in (canonical_text, legacy_text)
+            ]
+            source = ", ".join(f"? AS a{i}" for i in range(len(cells)))
+            texts = conn.execute(
+                f"SELECT {', '.join(arrays + values)} FROM (SELECT {source})",
+                [merged.get(c) for c in cells],
+            ).fetchone()
             ok = (
                 prov
-                and prov["inputs_hash"] == hashlib.sha256(text.encode()).hexdigest()
-                and prov["value_hash"] == hashlib.sha256(vtext.encode()).hexdigest()
+                and prov["inputs_hash"] in {_sha(texts[0]), _sha(texts[1])}
+                and prov["value_hash"] in {_sha(texts[2]), _sha(texts[3])}
             )
             if not ok:
                 viol.append(

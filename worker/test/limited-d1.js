@@ -1,9 +1,11 @@
 // Real SQLite limits also apply to intermediate values and transaction records,
 // which a wrapper checking only bound string lengths would miss.
 export class LimitedD1 {
-  constructor() {
+  // realNumbers: bind every JS number as a REAL, as D1 does (1999 -> 1999.0).
+  constructor({realNumbers=false} = {}) {
     this.process = Bun.spawn(['uv', 'run', '--quiet', '--project', `${import.meta.dir}/../..`,
-      'python', '-B', `${import.meta.dir}/fixtures/limited_d1.py`], {stdin:'pipe',stdout:'pipe',stderr:'inherit'});
+      'python', '-B', `${import.meta.dir}/fixtures/limited_d1.py`, ...(realNumbers ? ['--real-numbers'] : [])],
+      {stdin:'pipe',stdout:'pipe',stderr:'inherit'});
     this.reader = this.process.stdout.getReader();
     this.decoder = new TextDecoder();
     this.buffer = '';

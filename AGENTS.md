@@ -465,9 +465,13 @@ reads never provision either store or rewrite saved definitions.
   a client never writes a derived column (any write that changes one is
   rejected locally and again at the hub), and the hub verifies
   `provenance.inputs_hash`/`value_hash` against the pushed row. **A
-  derivation's `inputs` must be cataloged columns** - both sides hash values as
-  SQLite renders them, and the hub needs the catalog `type` to know a `number`
-  binds through REAL (4 → `"4.0"`, not `"4"`).
+  derivation's `inputs` must be cataloged columns** - both sides hash one typed
+  rendering, identical for a stored cell and a bound value (`canonicalSql` in
+  `worker/src/validate.js`, `canonical_text` in `catalog.py`): a `number` is REAL
+  text (4 → `"4.0"`), every other type renders an integral REAL as an integer,
+  because D1 binds every JS number as a REAL (a stored 1999 rebinds as 1999.0).
+  Proofs in the earlier all-REAL rendering (`"1999.0"`, also written by external
+  writers matching it) are accepted alongside, so they stay fresh unrefetched.
 - Every temp table the rule engine makes (`now`, `changed`, `before`,
   `_before_<t>`) is schema-qualified `temp.` - unqualified names fall through
   to `main`, so an unqualified DROP would delete a user table of that name.

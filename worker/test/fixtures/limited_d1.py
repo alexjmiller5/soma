@@ -12,8 +12,15 @@ db.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, 100_000)
 db.setlimit(sqlite3.SQLITE_LIMIT_COMPOUND_SELECT, 5)
 
 
+# D1 binds every JavaScript number as a REAL; JSON hands Python integers.
+REAL_NUMBERS = "--real-numbers" in sys.argv
+
+
 def execute(statement):
-    cursor = db.execute(statement["sql"], statement.get("args", []))
+    args = statement.get("args", [])
+    if REAL_NUMBERS:
+        args = [float(a) if type(a) is int else a for a in args]
+    cursor = db.execute(statement["sql"], args)
     return {
         "results": [dict(row) for row in cursor.fetchall()],
         "columns": [column[0] for column in cursor.description or []],

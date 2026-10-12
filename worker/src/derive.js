@@ -13,7 +13,7 @@
 
 import { historyPlan } from "./history.js";
 import { checkedReads, commitChecked, enforcedRules, queryBudget } from "./write.js";
-import { ident, inputsHash, propertiesFor, qident, sha256hex, validateRow, valueHash, storageRow } from "./validate.js";
+import { ident, proofHashes, propertiesFor, qident, sha256hex, validateRow, storageRow } from "./validate.js";
 
 // A hung endpoint would otherwise stall the whole sequential sweep.
 const ENDPOINT_TIMEOUT_MS = 60_000;
@@ -230,7 +230,8 @@ export async function deriveRows(db, env, table, ids, { fetchImpl = fetch, names
         // provenance is a synced table like any other: a hub write stamps hub_at
         // (when the table has it) or replicas past the cursor never pull the proof.
         const hasHubAt = await provenanceHasHubAt(db);
-        const ih = await inputsHash(db, typeOf, inputs, row);
+        const hashes = await proofHashes(db, typeOf, inputs, { ...row, ...values }, written.map(([c]) => c));
+        const ih = hashes.inputs[0];
         for (const [c, v] of written) {
           stmts.push(
             db
@@ -251,7 +252,7 @@ export async function deriveRows(db, env, table, ids, { fetchImpl = fetch, names
                 // the endpoint's own ref when it gives one, else the inputs the value came from
                 result._source_ref ?? ih,
                 ih,
-                await valueHash(db, typeOf, c, v)
+                hashes.values[c][0]
               )
           );
         }
@@ -288,7 +289,7 @@ async function staleWork(db, table, typeOf, byName, rows) {
           .prepare("SELECT inputs_hash FROM provenance WHERE id = ? AND deleted_at IS NULL")
           .bind(`${table}:${row.id}:${p.col}`)
           .first();
-        if (prov && prov.inputs_hash === (await inputsHash(db, typeOf, p.inputs ?? [], row))) continue;
+        if (prov && (await proofHashes(db, typeOf, p.inputs ?? [], row)).inputs.includes(prov.inputs_hash)) continue;
         if (!work.has(name)) work.set(name, new Set());
         work.get(name).add(row.id);
         break;

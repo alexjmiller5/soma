@@ -32,24 +32,39 @@ export async function propertiesFor(db, table) {
   }));
 }
 
-// SQLite stores a `number` column as REAL, so the client hashes 4 as "4.0".
-// The pushed JSON carries a bare 4, which binds as INTEGER and would render
-// "4". Cast every cataloged `number` through REAL first so both sides agree.
-// (This is why a derivation's inputs must themselves be cataloged columns.)
-const castText = (isNumber) => (isNumber ? "CAST(CAST(? AS REAL) AS TEXT)" : "CAST(? AS TEXT)");
-
-// The two hashes provenance is made of, rendered by SQLite so the client, the
-// hub validator and the derivation engine agree byte for byte. `typeOf` is a
-// {col: type} object from the catalog.
-export async function inputsHash(db, typeOf, inputs, row) {
-  const casts = inputs.map((c) => castText(typeOf[c] === "number")).join(", ") || "NULL";
-  const stmt = db.prepare(`SELECT json_array(${casts}) AS j`).bind(...inputs.map((c) => row[c] ?? null));
-  return sha256hex(Object.values(await stmt.first())[0]);
+// How a cell is rendered for hashing, typed by the catalog and identical for a
+// stored column and a bound value (src/soma/catalog.py `canonical_text` mirrors
+// it). D1 binds every JS number as a REAL, so a stored INTEGER 1999 read back
+// and rebound arrives as 1999.0: a `number` is always REAL text (4 -> "4.0"),
+// every other type renders an integral REAL as an integer ("1999"). This is why
+// a derivation's inputs must themselves be cataloged columns.
+export function canonicalSql(expr, type) {
+  if (type === "number") return `CAST(CAST(${expr} AS REAL) AS TEXT)`;
+  return `CASE WHEN typeof(${expr}) = 'real' AND ${expr} = CAST(${expr} AS INTEGER) THEN CAST(CAST(${expr} AS INTEGER) AS TEXT) ELSE CAST(${expr} AS TEXT) END`;
 }
 
-export async function valueHash(db, typeOf, col, value) {
-  const stmt = db.prepare(`SELECT coalesce(${castText(typeOf[col] === "number")}, '') AS v`).bind(value ?? null);
-  return sha256hex(Object.values(await stmt.first())[0]);
+// Proofs hubs wrote before the typed rendering hashed every bound number as
+// REAL text ("1999.0"), and external writers matched that. Readers accept both
+// forms, so existing proofs stay fresh without re-fetching their providers.
+export function legacySql(expr, type) {
+  if (type === "number") return canonicalSql(expr, type);
+  return `CASE WHEN typeof(${expr}) IN ('integer', 'real') THEN CAST(CAST(${expr} AS REAL) AS TEXT) ELSE CAST(${expr} AS TEXT) END`;
+}
+
+// The hashes provenance is made of, in ONE statement: the inputs and each of
+// `cols`' values, each as [canonical, legacy]. `typeOf` is a {col: type}
+// object from the catalog.
+export async function proofHashes(db, typeOf, inputs, row, cols = []) {
+  const cells = [...inputs, ...cols];
+  const arg = (i) => `a${i}`;
+  const array = (render) => `json_array(${inputs.map((c, i) => render(arg(i), typeOf[c])).join(", ") || "NULL"})`;
+  const value = (render, c, i) => `coalesce(${render(arg(inputs.length + i), typeOf[c])}, '')`;
+  const source = cells.length ? `(SELECT ${cells.map((_, i) => `? AS ${arg(i)}`).join(", ")})` : "(SELECT 1)";
+  const sql = [array(canonicalSql), array(legacySql), ...cols.flatMap((c, i) => [value(canonicalSql, c, i), value(legacySql, c, i)])];
+  const texts = await db.prepare(`SELECT ${sql.map((s, i) => `${s} AS h${i}`).join(", ")} FROM ${source}`)
+    .bind(...cells.map((c) => row[c] ?? null)).first();
+  const hashes = await Promise.all(sql.map((_, i) => sha256hex(texts[`h${i}`])));
+  return { inputs: hashes.slice(0, 2), values: Object.fromEntries(cols.map((c, i) => [c, hashes.slice(2 + 2 * i, 4 + 2 * i)])) };
 }
 
 
@@ -149,10 +164,8 @@ export async function validatePush(db, table, rows, storageDb = null, insertOnly
       if (!changed) continue;
       const prov = await db.prepare("SELECT inputs_hash, value_hash FROM provenance WHERE id = ? AND deleted_at IS NULL")
         .bind(`${table}:${row.id}:${p.col}`).first();
-      const ok =
-        prov &&
-        prov.inputs_hash === (await inputsHash(db, typeOf, p.inputs, merged)) &&
-        prov.value_hash === (await valueHash(db, typeOf, p.col, merged[p.col]));
+      const hashes = prov && await proofHashes(db, typeOf, p.inputs, merged, [p.col]);
+      const ok = prov && hashes.inputs.includes(prov.inputs_hash) && hashes.values[p.col].includes(prov.value_hash);
       if (!ok) {
         viol.push({ col: p.col, rule: "provenance", message: `${p.col} changed without a matching provenance record.` });
       }
