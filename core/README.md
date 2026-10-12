@@ -60,7 +60,7 @@ source imports no platform modules. Inject a `SqlDriver` and a `Hub`.
   table, row and revision. Repeated edits coalesce into one pending row.
   An accepted sync receipt clears only markers at or below its submitted
   revision; newer concurrent edits, rejections and lost receipts stay pending.
-- `syncStatus(driver)` returns `{ lastSuccessfulSync, pendingUiEdits, rejected, skippedTables }`
+- `syncStatus(driver)` returns `{ lastSuccessfulSync, pendingUiEdits, rejected, skippedTables, skippedDetails }`
   from local durable state. The timestamp is the last completed core round's
   checkpoint, or `null`; rejected rows do not hold it back. Counts are pending UI-written rows and rows in the
   rejection inbox. Pending UI edits await this core's own valid receipt even
@@ -72,6 +72,18 @@ source imports no platform modules. Inject a `SqlDriver` and a `Hub`.
   stored lists fail explicitly. Hosts read this list after reopen rather than
   writing their own copy. It is a warning about that round, not coverage or
   freshness proof, and an empty list does not certify a complete replica.
+  A round skips a table the host excludes (`tables[t] === false`), or, without
+  an explicit choice, one whose hub row count is unknown or over `maxRows`
+  (default `SIZE_RULE_ROWS`, 50,000); catalogs never skip. A skipped table is
+  read-only on this device: `writeability` and the writer refuse it with rule
+  `not_synced` ("Not synced on this device. Download this table to edit it.").
+  Edits queued before it was skipped stay in `_core_pending` and upload once a
+  round includes it again. `skippedDetails` lists each skipped table with
+  `rows` (the stored hub count, or null), `estimatedBytes` (`rows` times the
+  average size of up to 100 retained local rows, or null) and `waitingEdits`
+  (its pending UI edits, also counted in `pendingUiEdits`), so hosts can show
+  them as waiting for that table rather than uploading, and suggest the
+  download setting (include the table, or a `maxRows` covering `rows`).
 - `readRejections(driver, { limit?, offset? })`, or the generated `rejections`
   operation, reads the durable inbox without initialization, DDL or mutation.
   It returns `{ rejections: [{ table, rowID, submitted, errors }], nextOffset }`.
@@ -378,7 +390,7 @@ It is an advisory over the same table guards as `writeRow`, with no persistent
 changes; a successful
 answer does not approve a patch or selected revision. The writer rechecks
 inside its transaction. Reasons include `coverage`, `trigger`, `foreign_key`,
-`invariant`, `context`, `schema` and `read_only`; UI can display `reason.message` directly.
+`invariant`, `context`, `schema`, `read_only` and `not_synced`; UI can display `reason.message` directly.
 
 ### Compiler read metadata
 

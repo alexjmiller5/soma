@@ -3,6 +3,7 @@ import { READ_DEPENDENCY_LIMITS } from './driver.ts';
 import { decodeProperty } from './catalog.ts';
 import { initCore } from './sync.ts';
 import { coverageProblem } from './coverage.ts';
+import { skippedTableNames } from './status.ts';
 import { supportedRuleSql } from './rule-sql.ts';
 import { isSearchTrigger } from './search.ts';
 import { asList, empty, qident, validEditTimestamp, validateRow, type Property, type Row, type Violation } from './validate.ts';
@@ -135,6 +136,11 @@ export async function prepareWriteStorage(db: SqlDriver, table: string, fail: Fa
 }
 async function prepareWrite(db: SqlDriver, table: string, fail: Fail) {
   const cols = await prepareWriteStorage(db, table, fail);
+  // A table this device does not sync never uploads an edit; its local rows are read-only.
+  let skipped: string[];
+  try { skipped = await skippedTableNames(db); }
+  catch (error) { return fail('', 'not_synced', (error as Error).message); }
+  if (skipped.includes(table)) fail('', 'not_synced', 'Not synced on this device. Download this table to edit it.');
   const props = (await db.all('SELECT * FROM main.catalog_properties WHERE tbl=? AND deleted_at IS NULL ORDER BY sort,col', [table])).map(row => {
     try { return decodeProperty(row); }
     catch { return fail(String(row.col ?? ''), 'catalog', 'Invalid catalog property; repair options/inputs before writing.'); }

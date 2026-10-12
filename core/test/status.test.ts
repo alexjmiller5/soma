@@ -30,7 +30,7 @@ async function replica(path?: string, collation?: string) {
 test('syncStatus is exported and an empty replica has no UI work or successful sync', async () => {
   const db = new TestSql(); cleanup.push(() => db.db.close());
   expect(typeof core.syncStatus).toBe('function');
-  expect(await core.syncStatus(db)).toEqual({ lastSuccessfulSync: null, pendingUiEdits: 0, rejected: 0, skippedTables: [] });
+  expect(await core.syncStatus(db)).toEqual({ lastSuccessfulSync: null, pendingUiEdits: 0, rejected: 0, skippedTables: [], skippedDetails: [] });
 });
 
 test('status and coalesced UI markers persist across reopening the database', async () => {
@@ -74,7 +74,7 @@ test.each(['offline', 'lost receipt', 'malformed receipt', 'rejection'])('pendin
   if (failure === 'rejection') await core.writeRow(db, 'items', { id: row.id, qty: 1 });
   const finished = new Date(Date.now() + 100);
   await core.sync(db, hub, { now: () => finished });
-  expect(await core.syncStatus(db)).toEqual({ lastSuccessfulSync: finished.toISOString(), pendingUiEdits: 0, rejected: 0, skippedTables: [] });
+  expect(await core.syncStatus(db)).toEqual({ lastSuccessfulSync: finished.toISOString(), pendingUiEdits: 0, rejected: 0, skippedTables: [], skippedDetails: [] });
   expect(remote.db.query('SELECT name FROM items WHERE id=?').get(row.id)).toEqual({ name: 'Offline edit' });
 });
 
@@ -334,7 +334,8 @@ test('legacy web skipped_tables state is read without host certification or muta
   await core.initCore(db);
   await db.run("INSERT INTO _core_state(key,value) VALUES ('last_sync',?),('skipped_tables',?)", [T0, '["items"]']);
   const before = await db.all('SELECT * FROM _core_state ORDER BY key');
-  expect(await core.syncStatus(db)).toEqual({ lastSuccessfulSync: T0, pendingUiEdits: 0, rejected: 0, skippedTables: ['items'] });
+  expect(await core.syncStatus(db)).toEqual({ lastSuccessfulSync: T0, pendingUiEdits: 0, rejected: 0, skippedTables: ['items'],
+    skippedDetails: [{ table: 'items', rows: null, estimatedBytes: null, waitingEdits: 0 }] });
   expect(await db.all('SELECT * FROM _core_state ORDER BY key')).toEqual(before);
   expect(await db.all('SELECT * FROM _core_coverage')).toEqual([]);
 });
@@ -357,9 +358,10 @@ test.each([false, true])('completed pulls publish changed skips and completion t
   for (const [col, type] of [['name','text'],['qty','int']]) {
     remote.db.query('INSERT INTO catalog_properties(id,tbl,col,type,required,updated_at,hub_at) VALUES (?,?,?,?,?,?,?)').run(`items.${col}`,'items',col,type,1,T0,T1);
   }
-  if (previousSuccess) await core.sync(db, hub, { tables: { items: false } });
   await db.run("UPDATE catalog_properties SET required=0 WHERE col='qty'");
   await core.writeRow(db, 'items', { name: 'Missing qty' });
+  // A skipped table refuses new edits, so the edit is queued before its skipped round.
+  if (previousSuccess) await core.sync(db, hub, { tables: { items: false } });
   // A round's completion time is its start checkpoint: two rounds in one
   // millisecond would publish the same value, so this one starts strictly later.
   const checkpoint = new Date(Date.now() + 1);
@@ -390,4 +392,49 @@ test('a resumed page walk never skips a remote revision deferred behind an unsen
   await core.sync(db, hub);
   await core.sync(db, hub);
   expect(await db.all("SELECT name FROM items WHERE id='001'")).toEqual([{ name: 'Remote' }]);
+});
+
+test('a skipped table is read-only on this device until a round downloads it', async () => {
+  const { db, hub, remote } = await replica();
+  await core.writeRow(db, 'items', { name: 'Waiting' }, { id: () => 'a' });
+  await core.sync(db, hub, { tables: { items: false } });
+  const refused = { tbl: 'items', row_id: null, col: '', rule: 'not_synced', message: 'Not synced on this device. Download this table to edit it.' };
+  expect(await core.writeability(db, { table: 'items' })).toEqual({ writable: false, reason: refused });
+  // The writer rechecks inside its own transaction: nothing is written or queued.
+  const before = await db.all('SELECT * FROM items');
+  await expect(core.writeRow(db, 'items', { id: 'a', name: 'Refused' })).rejects.toMatchObject({ violations: [{ ...refused, row_id: 'a' }] });
+  await expect(core.writeRow(db, 'items', { name: 'Refused' })).rejects.toMatchObject({ violations: [refused] });
+  expect(await db.all('SELECT * FROM items')).toEqual(before);
+  // The earlier edit waits for the table instead of reading as an upload in progress.
+  expect(await core.syncStatus(db)).toMatchObject({ pendingUiEdits: 1, skippedTables: ['items'],
+    skippedDetails: [{ table: 'items', rows: 0, estimatedBytes: expect.any(Number), waitingEdits: 1 }] });
+  expect(remote.db.query('SELECT * FROM items').all()).toEqual([]);
+  await core.sync(db, hub, { tables: { items: true } });
+  expect(await core.writeability(db, { table: 'items' })).toEqual({ writable: true, reason: null });
+  expect(await core.syncStatus(db)).toMatchObject({ pendingUiEdits: 0, skippedTables: [], skippedDetails: [] });
+  expect(remote.db.query('SELECT name FROM items').all()).toEqual([{ name: 'Waiting' }]);
+  await core.writeRow(db, 'items', { id: 'a', name: 'Editable' });
+});
+
+test('skipped details carry the hub row count and a size estimate from local rows', async () => {
+  const { db, hub, remote } = await replica();
+  const insert = remote.db.query('INSERT INTO items(id,name,qty,created_at,updated_at,hub_at) VALUES (?,?,?,?,?,?)');
+  insert.run('a', 'Ä short', 7, T0, T0, T1);
+  insert.run('b', 'A longer name', null, T0, T0, T1);
+  await core.sync(db, hub);
+  insert.run('c', 'Third', 3, T0, T0, T2);
+  // Both sides cache counts for a day; recount now.
+  remote.db.exec('DELETE FROM _table_stats');
+  await db.run("DELETE FROM _core_state WHERE key='hub_stats'");
+  // The size rule: three rows on the hub, a limit of two.
+  expect((await core.sync(db, hub, { maxRows: 2 })).skipped).toEqual(['items']);
+  const local = await db.all('SELECT * FROM items');
+  const bytes = local.reduce((n, row) => n + Object.values(row).reduce((m: number, v) => m + (v == null ? 0 : Buffer.byteLength(String(v))), 0), 0);
+  expect((await core.syncStatus(db)).skippedDetails).toEqual([{ table: 'items', rows: 3, estimatedBytes: Math.round(3 * bytes / local.length), waitingEdits: 0 }]);
+  // No local rows: the size stays unknown rather than guessed.
+  await db.run('DELETE FROM items');
+  expect((await core.syncStatus(db)).skippedDetails).toEqual([{ table: 'items', rows: 3, estimatedBytes: null, waitingEdits: 0 }]);
+  // No stored hub count: the row count is unknown too.
+  await db.run("DELETE FROM _core_state WHERE key='hub_stats'");
+  expect((await core.syncStatus(db)).skippedDetails).toEqual([{ table: 'items', rows: null, estimatedBytes: null, waitingEdits: 0 }]);
 });

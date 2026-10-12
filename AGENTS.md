@@ -310,6 +310,12 @@ reads never provision either store or rewrite saved definitions.
   and count separately. Hosts consume this
   warning after reopen; they do not persist exclusions or certify coverage.
   The existing `_core_state.skipped_tables` JSON key remains compatible.
+  Skipped tables are read-only on that device: `writeability` and the writer
+  refuse them (rule `not_synced`) inside the write transaction. Edits queued
+  before the skip stay pending and upload when a round includes the table again;
+  `skippedDetails` gives each skipped table's hub row count, estimated size and
+  those waiting edits, so hosts suggest a download setting instead of showing
+  an upload that never finishes.
 - `core/src/rejections.ts` owns durable inbox reads through the generated
   `rejections` operation. Bounded offset pages preserve exact IDs, submitted
   snapshots and raw hub error objects. Reads never initialize or modify storage;

@@ -7,7 +7,7 @@ import type {
 } from "./contract.generated.ts";
 import type { SqlDriver } from "./driver.ts";
 import { readCatalog } from "./catalog.ts";
-import { syncStatus } from "./status.ts";
+import { skippedTableNames } from "./status.ts";
 import { getRelatedViewDefault } from "./view-defaults.ts";
 import { openSearchIndex } from "./search.ts";
 import { displayName,compileReferenceView } from "./view.ts";
@@ -38,7 +38,7 @@ async function context(
   const catalog = await readCatalog(db);
   if (!catalog.tables.some((entry) => entry.id === table))
     throw Error("Table is not in the catalog");
-  const skipped = new Set((await syncStatus(db)).skippedTables);
+  const skipped = new Set(await skippedTableNames(db));
   const tables = new Set(catalog.tables.map((entry) => entry.id));
   const sources: ReferenceSource[] = [];
   for (const property of catalog.properties) {

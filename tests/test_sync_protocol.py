@@ -95,6 +95,7 @@ console.log(JSON.stringify(await syncStatus(db))); db.db.close();
         "pendingUiEdits": 1,
         "rejected": 0,
         "skippedTables": [],
+        "skippedDetails": [],
     }
     assert ui_status("write") == pending
     execute_sql(path, "INSERT INTO items(id,name) VALUES ('cli','CLI edit')")

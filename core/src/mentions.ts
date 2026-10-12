@@ -3,7 +3,7 @@ import type { SqlDriver } from './driver.ts';
 import { readCatalog } from './catalog.ts';
 import { openSearchIndex, searchIndexing } from './search.ts';
 import { calendarPolicy, loadSavedView } from './saved-views.ts';
-import { syncStatus } from './status.ts';
+import { skippedTableNames } from './status.ts';
 import { qident } from './validate.ts';
 import { compileView, displayName } from './view.ts';
 
@@ -64,7 +64,7 @@ export async function mentionedBy(db: SqlDriver, args: MentionedByArgs): Promise
     return {
       rows: rows.slice(0, limit) as MentionedByPage['rows'],
       nextOffset: rows.length > limit ? offset + limit : null,
-      incomplete: (await syncStatus(db)).skippedTables.length > 0,
+      incomplete: (await skippedTableNames(db)).length > 0,
       indexing: await searchIndexing(db),
     };
   });
