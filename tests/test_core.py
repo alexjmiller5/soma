@@ -718,6 +718,21 @@ def test_sync_pushes_rows_before_rows_whose_invariants_need_them(db, hub):
     assert [r["source_id"] for r in hub.rows_pull("overlay", ["source_id"], "")] == ["t1"]
 
 
+def test_sync_pushes_rows_after_the_rows_they_reference(db, hub):
+    from soma.catalog import set_property
+
+    # Name order would push a_child first and the hub would reject its ref
+    # until the next round brought the z_parent row.
+    create_table(db, "z_parent", ["name:text"])
+    create_table(db, "a_child", ["parent_id:ref"])
+    set_property(db, "a_child", "parent_id", ref_table="z_parent")
+    sync(db, hub)
+    insert_rows(db, "z_parent", [{"id": "p1", "name": "P"}])
+    insert_rows(db, "a_child", [{"id": "c1", "parent_id": "p1"}])
+    assert sync(db, hub)["rejected"] == []
+    assert [r["id"] for r in hub.rows_pull("a_child", ["id"], "")] == ["c1"]
+
+
 def test_fresh_replica_pulls_schema_and_rows_without_echoing(db, hub, tmp_path):
     _mk_people(db, ["Ada", "Grace"])
     sync(db, hub)
