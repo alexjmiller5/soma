@@ -553,7 +553,8 @@ reads never provision either store or rewrite saved definitions.
   write rows with `rel='derived_from'`, `asserted_by='hub'`, `from_kind =
   'http:<name>'`, `from_ref = _source_ref ?? inputs_hash`, id
   `<to_kind>:<to_ref>:<field>`, plus `inputs_hash`/`value_hash`/`produced_at`
-  and `detail` `{"no_data":true}` for a lookup that completed without data.
+  and `detail` `{"no_data":true}` for a lookup that completed without data,
+  plus `"raw"` (the retained file key) when the endpoint returned `_raw`.
   Clients write observation edges into the same table (a text, an email, a
   photo, an import backing a row or one column: `rel` evidence_of /
   mentions / imported_from, `field` = the column or NULL for the whole row,
@@ -922,7 +923,12 @@ ONLY through the `DERIVATIONS` Worker secret - a JSON object
 source may be named in `worker/src`.**
 The hub POSTs `{tbl, id, inputs:{col: value}}` and writes back the response
 keys that are derived columns of that derivation (plus `_source_ref`);
-anything else is ignored. A 2xx object is a completed lookup: each derived
+anything else is ignored. An optional `_raw` object (the endpoint's complete
+upstream responses) is stored first in `ARCHIVE` at
+`raw/derivations/<name>/<sha256 of its JSON>.json` and cited as `"raw"` in
+every proof `detail` of that call; an invalid `_raw`, a missing bucket or a
+failed write fails the row with nothing written. No-data checks parse
+`detail` JSON (`no_data` true), never compare its text. A 2xx object is a completed lookup: each derived
 column it omits gets a no-data proof (`detail` `{"no_data":true}`, `value_hash`
 of the value left in place, which is never cleared), so a no-match stops being
 retried every sweep. No-data proofs refresh after `no_data_refresh_days`

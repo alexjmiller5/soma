@@ -105,8 +105,6 @@ const PENDING = "derivation budget reached before this row; retry it";
 const LIMITED = "derivation limit reached before this row; the sweep retries it";
 const UNSCANNED = "derivation sweep budget reached before the end of this table; the next sweep resumes";
 const waiting = (f) => f.error === PENDING || f.error === LIMITED || /deferred by cooldown/.test(f.error);
-// provenance.detail of a lookup that completed without data for its column.
-const NO_DATA = '{"no_data":true}';
 const NO_DATA_DAYS = 7;
 const DAY_MS = 86_400_000;
 // Rows judged per freshness read pair, and per sweep page.
@@ -130,7 +128,24 @@ function refreshCutoffs(env, byName) {
     return [name, { value: cutoff(refreshDays), noData: cutoff(noDataDays) }];
   }));
 }
-const expired = (proof, cutoff) => proof.produced_at < (proof.detail === NO_DATA ? cutoff.noData : cutoff.value);
+// provenance.detail of a lookup that completed without data for its column is
+// {"no_data":true}, plus "raw" when it cites retained raw responses.
+const isNoData = (detail) => { try { return JSON.parse(detail ?? "null")?.no_data === true; } catch { return false; } };
+const NO_DATA_SQL = `CASE WHEN json_valid(p.detail) THEN json_extract(p.detail, '$.no_data') END IS 1`;
+const expired = (proof, cutoff) => proof.produced_at < (isNoData(proof.detail) ? cutoff.noData : cutoff.value);
+
+// An endpoint's complete upstream responses (`_raw`) go to the hub's own files,
+// content-addressed, before any proof cites them. No bucket or a failed write
+// fails the row: a proof never points at raw data that is not there.
+async function retainRaw(env, name, raw) {
+  if (raw === undefined) return null;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`endpoint ${name} returned an invalid _raw`);
+  if (!env?.ARCHIVE) throw new Error("no archive bucket to retain _raw responses");
+  const body = JSON.stringify(raw);
+  const key = `raw/derivations/${name}/${await sha256hex(body)}.json`;
+  await env.ARCHIVE.put(key, body, { httpMetadata: { contentType: "application/json" } });
+  return key;
+}
 
 // Derived properties of `table`, grouped by derivation name.
 async function derivationProps(db, table) {
@@ -278,13 +293,15 @@ export async function deriveRows(db, env, table, ids, { fetchImpl = fetch, names
 
         const written = Object.entries(values);
         if (!written.length && !missing.length) continue;
+        const raw = await retainRaw(env, name, result._raw);
+        const cite = (detail) => (raw ? JSON.stringify({ ...detail, raw }) : detail && JSON.stringify(detail));
         // provenance is a synced table like any other: a hub write stamps hub_at
         // (when the table has it) or replicas past the cursor never pull the proof.
         const hasHubAt = await provenanceHasHubAt(db);
         // A no-data proof hashes the value it leaves in place.
         const hashes = await proofHashes(db, typeOf, inputs, { ...row, ...values }, [...written.map(([c]) => c), ...missing]);
         const ih = hashes.inputs[0];
-        const stmts = [...written.map(([c]) => [c, null]), ...missing.map((c) => [c, NO_DATA])].map(([c, detail]) => db
+        const stmts = [...written.map(([c]) => [c, cite(null)]), ...missing.map((c) => [c, cite({ no_data: true })])].map(([c, detail]) => db
           .prepare(
             `INSERT INTO provenance (id, to_kind, to_ref, field, from_kind, from_ref, rel, asserted_by, detail, inputs_hash, value_hash, produced_at, updated_at, deleted_at${hasHubAt ? ", hub_at" : ""})
              VALUES (?, ?, ?, ?, ?, ?, 'derived_from', 'hub', ?, ?, ?, (${NOW}), (${NOW}), NULL${hasHubAt ? `, (${NOW})` : ""})
@@ -421,7 +438,7 @@ export async function deriveStale(db, env, table, rows, { fetchImpl = fetch, lim
 async function candidates(db, t, byName, cutoffs, after, limit) {
   const unproven = [...byName].flatMap(([name, cols]) => cols.map((p) => `NOT EXISTS (SELECT 1 FROM provenance p
     WHERE p.id = ${literal(`${t}:`)} || t.id || ${literal(`:${p.col}`)} AND p.deleted_at IS NULL AND p.produced_at > t.updated_at
-    AND p.produced_at >= CASE WHEN p.detail = ${literal(NO_DATA)} THEN ${literal(cutoffs.get(name).noData)} ELSE ${literal(cutoffs.get(name).value)} END)`)).join(" OR ");
+    AND p.produced_at >= CASE WHEN ${NO_DATA_SQL} THEN ${literal(cutoffs.get(name).noData)} ELSE ${literal(cutoffs.get(name).value)} END)`)).join(" OR ");
   const { results } = await db.prepare(`SELECT t.id FROM ${qident(t)} t WHERE t.deleted_at IS NULL AND t.id > ? AND (${unproven}) ORDER BY t.id LIMIT ?`)
     .bind(after, limit).all();
   return (results ?? []).map((row) => row.id);

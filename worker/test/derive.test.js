@@ -987,3 +987,59 @@ test("one table's backlog cannot take every later table's share of a sweep", asy
   expect(out.failed.some((f) => f.id && f.id.startsWith("t"))).toBe(true); // tracks still has a backlog
   expect(db.db.query("SELECT label FROM zz").get().label).toBe("v");
 });
+
+// An endpoint may return its complete upstream responses as `_raw`: the hub
+// keeps them in its own files (content-addressed) and cites them on each proof.
+function archive() {
+  const puts = new Map();
+  return { puts, ARCHIVE: { async put(key, body, options) { puts.set(key, { body, options }); return { key }; } } };
+}
+const RAW = { source: "fixture", fetched_at: "2026-10-12T00:00:00.000Z", responses: [{ url: "https://upstream.example/78", status: 200, body: { title: "Blade Runner" } }] };
+
+test("retains an endpoint's raw responses under raw/derivations and cites them on every proof", async () => {
+  const db = await fresh();
+  const files = archive();
+  const { fetchImpl } = stub({ body: { title: "Blade Runner", _source_ref: "tmdb:movie/78@2026-09-04", _raw: RAW } });
+  expect(await deriveRows(db, { ...ENV, ARCHIVE: files.ARCHIVE }, "movies", ["78"], { fetchImpl })).toEqual({ derived: 1, failed: [] });
+  const key = `raw/derivations/tmdb_movie/${await hex(JSON.stringify(RAW))}.json`;
+  expect([...files.puts.keys()]).toEqual([key]);
+  expect(JSON.parse(files.puts.get(key).body)).toEqual(RAW);
+  expect(db.db.query("SELECT field, detail, from_ref FROM provenance ORDER BY field").all()).toEqual([
+    { field: "genres", detail: JSON.stringify({ no_data: true, raw: key }), from_ref: "tmdb:movie/78@2026-09-04" },
+    { field: "title", detail: JSON.stringify({ raw: key }), from_ref: "tmdb:movie/78@2026-09-04" },
+  ]);
+  expect(db.db.query("SELECT title FROM movies").get().title).toBe("Blade Runner");
+});
+
+test("a no-data proof that cites raw responses keeps the no-data refresh schedule", async () => {
+  const db = await fresh();
+  const files = archive();
+  const env = { ...ENV, ARCHIVE: files.ARCHIVE };
+  await deriveRows(db, env, "movies", ["78"], { fetchImpl: stub({ body: { title: "Blade Runner", _raw: RAW } }).fetchImpl });
+  const s = stub({ body: { title: "Blade Runner", genres: ["Sci-Fi"], _raw: RAW } });
+  for (let i = 0; i < 2; i++) expect(await sweep(db, env, { fetchImpl: s.fetchImpl })).toEqual({ derived: 0, failed: [] });
+  expect(s.calls).toHaveLength(0); // fresh: no-data proofs are not retried every sweep
+  // Proofs older than their cutoff but newer than the row: only the no-data schedule decides.
+  db.db.exec("UPDATE provenance SET produced_at = '2020-01-01T00:00:00.000Z'");
+  db.db.exec("UPDATE movies SET updated_at = '2019-01-01T00:00:00.000Z'");
+  expect(await sweep(db, env, { fetchImpl: s.fetchImpl })).toEqual({ derived: 1, failed: [] });
+  expect(s.calls).toHaveLength(1); // the old no-data proof expired; the value proof alone never would
+  expect(db.db.query("SELECT genres FROM movies").get().genres).toBe('["Sci-Fi"]');
+});
+
+test("raw responses that cannot be retained fail the row and write nothing", async () => {
+  for (const env of [
+    { ...ENV, ARCHIVE: { async put() { throw new Error("r2 down"); } } },
+    { ...ENV }, // no archive bucket bound
+  ]) {
+    const db = await fresh();
+    const out = await deriveRows(db, env, "movies", ["78"], { fetchImpl: stub({ body: { title: "Blade Runner", _raw: RAW } }).fetchImpl });
+    expect(out.derived).toBe(0);
+    expect(out.failed).toHaveLength(1);
+    expect(db.db.query("SELECT title FROM movies").get().title).toBe(null);
+    expect(db.db.query("SELECT count(*) AS n FROM provenance").get().n).toBe(0);
+  }
+  const db = await fresh();
+  const out = await deriveRows(db, { ...ENV, ARCHIVE: archive().ARCHIVE }, "movies", ["78"], { fetchImpl: stub({ body: { title: "Blade Runner", _raw: [1] } }).fetchImpl });
+  expect(out.failed[0].error).toContain("_raw");
+});
