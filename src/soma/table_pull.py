@@ -51,7 +51,7 @@ def http_post(endpoint, token, headers=None, timeout=60):
     return post
 
 
-def pull_tables(endpoint, token, tables, state, *, post=None, headers=None):
+def pull_tables(endpoint, token, tables, state, *, watch=(), post=None, headers=None):
     base = str(endpoint).rstrip("/")
     names = list(tables)
     if not names:
@@ -71,14 +71,14 @@ def pull_tables(endpoint, token, tables, state, *, post=None, headers=None):
         requests += 1
         return post(route, body)
 
-    marks = call("/v1/cursor", {"tables": names})
+    marks = call("/v1/cursor", {"tables": list(dict.fromkeys([*names, *watch]))})
     batch = (marks or {}).get("pull_batch") or {}
     if (
         not isinstance((marks or {}).get("tables"), dict)
         or any(
             not isinstance(marks["tables"].get(t), str)
             or not (marks["tables"][t] == "" or MARK.fullmatch(marks["tables"][t]))
-            for t in names
+            for t in [*names, *watch]
         )
         or not all(
             isinstance(batch.get(k), int) and not isinstance(batch.get(k), bool) and batch[k] > 0
@@ -167,13 +167,24 @@ def pull_tables(endpoint, token, tables, state, *, post=None, headers=None):
             "since": w["mark"],
             "n": sum(r.get("hub_at") == w["mark"] for r in w["rows"]),
         }
+    # A watched table is marked, never pulled: a consumer reading only a `where`
+    # slice of it re-reads the slice when this pair moves.
+    watched = {
+        t: {"mark": marks["tables"][t], "n": (marks.get("at_mark") or {}).get(t, 0)} for t in watch
+    }
     return {
         "changes": changes,
         "state": {"v": 1, "endpoint": base, "tables": nxt},
         "requests": requests,
+        "watched": watched,
     }
 
 
 def pull_table(endpoint, token, table, columns, state, **options):
     out = pull_tables(endpoint, token, {table: columns}, state, **options)
-    return {**out["changes"][table], "state": out["state"], "requests": out["requests"]}
+    return {
+        **out["changes"][table],
+        "state": out["state"],
+        "requests": out["requests"],
+        "watched": out["watched"],
+    }

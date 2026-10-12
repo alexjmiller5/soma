@@ -81,7 +81,13 @@ def test_first_round_is_full_and_a_quiet_round_is_one_cursor_request():
     assert hub.routes == ["/v1/cursor", "/v1/rows/pull"]
     hub.routes.clear()
     quiet = pull(hub, first["state"])
-    assert (quiet["full"], quiet["rows"], quiet["deleted"], quiet["tombstones"], quiet["requests"]) == (
+    assert (
+        quiet["full"],
+        quiet["rows"],
+        quiet["deleted"],
+        quiet["tombstones"],
+        quiet["requests"],
+    ) == (
         False,
         [],
         [],
@@ -154,6 +160,51 @@ def test_tables_share_requests_pages_walk_and_empty_tables_stay_quiet():
         and nxt["changes"]["notes"]["rows"][0]["body"] == "hello"
     )
     assert hub.routes == ["/v1/cursor", "/v1/rows/pull"]
+
+
+def test_a_watched_table_is_marked_in_the_cursor_request_never_pulled():
+    hub = Hub()
+    hub.put("bookmarks", "a", at(1), title="A")
+    tables = {"bookmarks": COLUMNS}
+    empty = pull_tables("https://hub.test", "token", tables, None, watch=["notes"], post=hub.post)
+    assert empty["watched"] == {"notes": {"mark": "", "n": 0}}
+    hub.put("notes", "n", at(3), body="slice")
+    hub.routes.clear()
+    first = pull_tables(
+        "https://hub.test", "token", tables, empty["state"], watch=["notes"], post=hub.post
+    )
+    # A consumer reading only a slice of `notes` re-reads it when this pair moves.
+    assert first["watched"] == {"notes": {"mark": at(3), "n": 1}}
+    assert "notes" not in first["changes"] and "notes" not in first["state"]["tables"]
+    assert hub.routes == ["/v1/cursor"]
+    hub.put("notes", "m", at(3), body="same millisecond")
+    nxt = pull_tables(
+        "https://hub.test", "token", tables, first["state"], watch=["notes"], post=hub.post
+    )
+    assert nxt["watched"] == {"notes": {"mark": at(3), "n": 2}}
+    one = pull_table(
+        "https://hub.test", "token", "bookmarks", COLUMNS, None, watch=["bookmarks"], post=hub.post
+    )
+    assert one["watched"] == {"bookmarks": {"mark": at(1), "n": 1}}
+
+
+def test_a_malformed_watched_mark_fails_the_round():
+    answer = {
+        "tables": {"bookmarks": at(1), "notes": "yesterday"},
+        "at_mark": {"bookmarks": 1},
+        "pull_batch": {"items": 50, "rows": 5000},
+    }
+    replies = iter([answer])
+    with pytest.raises(HubError, match="invalid cursor response"):
+        pull_table(
+            "https://hub.test",
+            "token",
+            "bookmarks",
+            COLUMNS,
+            None,
+            watch=["notes"],
+            post=lambda route, body: next(replies),
+        )
 
 
 @pytest.mark.parametrize(

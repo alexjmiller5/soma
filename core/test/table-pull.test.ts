@@ -118,6 +118,27 @@ test('many tables share one cursor request and one batch; an empty table stays q
   expect(routes).toEqual(['/v1/cursor', '/v1/rows/pull']);
 });
 
+test('a watched table is marked in the same cursor request, never pulled', async () => {
+  const { put, routes, options } = await hub();
+  put('bookmarks', 'a', { url: 'https://a.test/', title: 'A' }, at(1));
+  const tables = { bookmarks: columns };
+  const empty = await pullTables({ ...options, tables, watch: ['notes'], state: null });
+  expect(empty.watched).toEqual({ notes: { mark: '', n: 0 } });
+  put('notes', 'n', { body: 'slice' }, at(3));
+  routes.length = 0;
+  const first = await pullTables({ ...options, tables, watch: ['notes'], state: empty.state });
+  // A consumer reading only a slice of `notes` re-reads it when this pair moves.
+  expect(first.watched).toEqual({ notes: { mark: at(3), n: 1 } });
+  expect(first.changes).not.toHaveProperty('notes');
+  expect(first.state.tables).not.toHaveProperty('notes');
+  expect(routes).toEqual(['/v1/cursor']);
+  put('notes', 'm', { body: 'same millisecond' }, at(3));
+  expect((await pullTables({ ...options, tables, watch: ['notes'], state: first.state })).watched)
+    .toEqual({ notes: { mark: at(3), n: 2 } });
+  expect((await pullTable({ ...options, table: 'bookmarks', columns, watch: ['bookmarks'], state: null })).watched)
+    .toEqual({ bookmarks: { mark: at(1), n: 1 } });
+});
+
 test('a table larger than one batch walks its pages', async () => {
   const { db, routes, options } = await hub();
   const insert = db.db.query("INSERT INTO bookmarks(id,url,title,updated_at,hub_at) VALUES (?,?,?,?,?)");
@@ -136,6 +157,8 @@ test('hub refusals and malformed answers fail the round and keep the caller stat
   const call = (fetch: any) => pullTable({ ...options, fetch, table: 'notes', columns: ['id'], state: null });
   await expect(call(answer({ tables: {} }))).rejects.toThrow('invalid cursor response');
   await expect(call(answer({ tables: { notes: 'yesterday' }, pull_batch: { items: 50, rows: 5000 } }))).rejects.toThrow('invalid cursor response');
+  await expect(pullTable({ ...options, fetch: answer({ tables: { notes: at(1), bookmarks: 'yesterday' }, at_mark: { notes: 1 }, pull_batch: { items: 50, rows: 5000 } }), table: 'notes', columns: ['id'], watch: ['bookmarks'], state: null }))
+    .rejects.toThrow('invalid cursor response');
   let n = 0;
   const looping = async (url: string) => new Response(JSON.stringify(url.endsWith('/v1/cursor')
     ? { tables: { notes: at(1) }, at_mark: { notes: 1 }, pull_batch: { items: 50, rows: 5000 } }

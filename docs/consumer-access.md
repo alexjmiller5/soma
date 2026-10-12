@@ -93,6 +93,11 @@ const { full, rows, deleted, state } = await pullTable({ endpoint, token, table:
   is small JSON kept in the consumer's own store (extension storage, a Durable
   Object, a Modal Volume, a state file), written only after the consumer has
   applied the changes. Losing it costs one full pull.
+- **Slices of large tables.** A consumer reading only a `where` slice (say
+  one kind of `provenance` edge) names that table in `watch`: the same cursor
+  request reports its `{mark, n}` in `watched` without pulling it. Re-read the
+  slice with a filtered `/v1/rows/pull` only when that pair differs from the one
+  held with it.
 - **Every pull carries `id`, `hub_at` and `deleted_at`**; the helper adds them.
   A tombstone arrives as a `deleted` id, and as a row with its pulled columns in
   `tombstones` for a consumer that keeps deleted rows.

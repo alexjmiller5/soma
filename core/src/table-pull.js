@@ -10,7 +10,7 @@
 
 const MARK = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
 
-export async function pullTables({ endpoint, token, tables, state, fetch: send = fetch, headers = {} }) {
+export async function pullTables({ endpoint, token, tables, state, watch = [], fetch: send = fetch, headers = {} }) {
   const base = String(endpoint).replace(/\/+$/, '');
   const names = Object.keys(tables ?? {});
   if (!names.length) throw new Error('name at least one table');
@@ -31,9 +31,9 @@ export async function pullTables({ endpoint, token, tables, state, fetch: send =
     return response.json();
   };
 
-  const marks = await post('/v1/cursor', { tables: names });
+  const marks = await post('/v1/cursor', { tables: [...new Set([...names, ...watch])] });
   const batch = marks?.pull_batch;
-  if (!marks?.tables || names.some(t => typeof marks.tables[t] !== 'string' || !(marks.tables[t] === '' || MARK.test(marks.tables[t])))
+  if (!marks?.tables || [...names, ...watch].some(t => typeof marks.tables[t] !== 'string' || !(marks.tables[t] === '' || MARK.test(marks.tables[t])))
     || ![batch?.items, batch?.rows].every(n => Number.isSafeInteger(n) && n > 0)) throw new Error('invalid cursor response');
 
   const changes = {}, next = {}, walks = [];
@@ -70,10 +70,13 @@ export async function pullTables({ endpoint, token, tables, state, fetch: send =
     changes[w.t] = { full: w.since === '', rows: w.rows.filter(r => r.deleted_at == null), deleted: tombstones.map(r => r.id), tombstones };
     next[w.t] = { columns: w.key, since: w.mark, n: w.rows.filter(r => r.hub_at === w.mark).length };
   }
-  return { changes, state: { v: 1, endpoint: base, tables: next }, requests };
+  // A watched table is marked, never pulled: a consumer reading only a `where`
+  // slice of it re-reads the slice when this pair moves.
+  const watched = Object.fromEntries(watch.map(t => [t, { mark: marks.tables[t], n: marks.at_mark?.[t] ?? 0 }]));
+  return { changes, state: { v: 1, endpoint: base, tables: next }, requests, watched };
 }
 
 export async function pullTable({ table, columns, ...options }) {
-  const { changes, state, requests } = await pullTables({ ...options, tables: { [table]: columns } });
-  return { ...changes[table], state, requests };
+  const { changes, state, requests, watched } = await pullTables({ ...options, tables: { [table]: columns } });
+  return { ...changes[table], state, requests, watched };
 }
