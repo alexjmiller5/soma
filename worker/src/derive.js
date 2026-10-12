@@ -299,7 +299,9 @@ async function staleWork(db, table, typeOf, byName, rows) {
   return work;
 }
 
-// Derive only what needs it, for rows already in hand (the on-push path).
+// Derive only what needs it, for the rows with these ids (the on-push path).
+// Callers may hold sparse rows (a push carries only the columns it writes), so
+// freshness is judged on the complete stored rows, never on what was passed.
 export async function deriveStale(db, env, table, rows, { fetchImpl = fetch, limit = 50 } = {}) {
   db = queryBudget(db,900);
   const t = ident(table);
@@ -307,6 +309,8 @@ export async function deriveStale(db, env, table, rows, { fetchImpl = fetch, lim
   try {
     const { typeOf, byName } = await derivationProps(db, t);
     if (!byName.size) return out;
+    ({ results: rows } = await db.prepare(`SELECT * FROM ${qident(t)} WHERE deleted_at IS NULL AND id IN (SELECT value FROM json_each(?))`)
+      .bind(JSON.stringify([...new Set(rows.map((row) => row.id))])).all());
     for (const [name, ids] of await staleWork(db, t, typeOf, byName, rows)) {
       const r = await deriveRows(db, env, t, [...ids].slice(0, limit), { fetchImpl, names: new Set([name]) });
       out.derived += r.derived;

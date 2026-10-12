@@ -645,10 +645,7 @@ const ROUTES = {
   "/v1/rows/patch": async (body, db, env, ctx, policy) => {
     const receipt=await patchChecked(db,body,policy);
     if (!(receipt instanceof Response) && !policy && ctx && env) {
-      ctx.waitUntil(logDerive((async()=>{
-        const row=await db.prepare(`SELECT * FROM ${qident(body.table)} WHERE id=? AND deleted_at IS NULL`).bind(body.id).first();
-        return deriveStale(queryBudget(db,200),env,body.table,row?[row]:[]);
-      })()));
+      ctx.waitUntil(logDerive(deriveStale(queryBudget(db,200),env,body.table,[{id:body.id}])));
     }
     return receipt;
   },

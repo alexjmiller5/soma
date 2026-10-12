@@ -764,3 +764,23 @@ test("proofs hashed in the earlier REAL rendering stay fresh: no re-derive, and 
   expect(push.rejected).toEqual([]);
   expect(db.db.query("SELECT decade FROM movies WHERE id = '78'").get().decade).toBe(1990);
 });
+
+test("a sparse push of an unrelated column does not re-derive from inputs it omitted", async () => {
+  const db = await fresh();
+  await db.prepare(`INSERT INTO catalog_properties (id, tbl, col, sort, type, derived_by, inputs) VALUES ('movies.blurb','movies','blurb',4,'text','http:blurb','["title"]')`).run();
+  const replies = {
+    "https://derivations.example/movie": { body: { title: "Blade Runner", genres: [] } },
+    "https://derivations.example/blurb": { body: { blurb: "a blurb" } },
+  };
+  expect(await deriveRows(db, ENV, "movies", ["78"], { fetchImpl: stub((url) => replies[url]).fetchImpl })).toEqual({ derived: 2, failed: [] });
+  const upstream = spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ blurb: "must not be asked" }));
+  const tasks = [];
+  try {
+    const out = await ROUTES["/v1/rows/push"]({ table: "movies", columns: ["id", "status", "updated_at"],
+      rows: [{ id: "78", status: "Finished", updated_at: "2030-01-01T00:00:00.000Z" }] }, db, ENV, { waitUntil: (p) => tasks.push(p) });
+    expect(out.rejected).toEqual([]);
+    await Promise.all(tasks);
+    expect(upstream).not.toHaveBeenCalled();
+    expect(db.db.query("SELECT blurb FROM movies WHERE id = '78'").get().blurb).toBe("a blurb");
+  } finally { upstream.mockRestore(); }
+});

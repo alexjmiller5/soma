@@ -919,8 +919,8 @@ failing its type/options/pattern is dropped and reported in `failed`, its
 siblings still land. A write is ONE guarded `db.batch`: provenance, value UPDATE, enforced
 invariants and actual cell history commit together. Reads captured before the
 external request prevent a concurrent edit from receiving stale output.
-Runs three ways: after `/v1/rows/push` or actual `/v1/rows/insert` creations via `ctx.waitUntil` (never delays the
-response; a failure is retried by the sweep), on the 15-minute sweep
+Runs three ways: after `/v1/rows/push`, `/v1/rows/patch` or actual `/v1/rows/insert` creations via `ctx.waitUntil` (never delays the
+response; a failure is retried by the sweep; freshness is judged on the complete stored rows, never the sparse payload), on the 15-minute sweep
 (underived or `inputs_hash`-stale, 50 per property), and synchronously via
 `POST /v1/derive {table, ids, col?}` (>50 ids → 400). Routes take
 `(body, db, env, ctx)` and may return a `Response` of their own. `soma derive
