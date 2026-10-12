@@ -924,13 +924,20 @@ invariants and actual cell history commit together. Reads captured before the
 external request prevent a concurrent edit from receiving stale output.
 Runs three ways: after `/v1/rows/push`, `/v1/rows/patch` or actual `/v1/rows/insert` creations via `ctx.waitUntil` (never delays the
 response; a failure is retried by the sweep; freshness is judged on the complete stored rows, never the sparse payload), on the 15-minute sweep
-(underived or `inputs_hash`-stale, 50 per property), and synchronously via
+(underived or `inputs_hash`-stale, 50 rows per table), and synchronously via
 `POST /v1/derive {table, ids, col?}` (>50 ids → 400). Routes take
 `(body, db, env, ctx)` and may return a `Response` of their own. `soma derive
 <tbl>.<col> [--where <sql>]` is a client-side wrapper around that route: it
 selects ids locally, calls `/v1/derive` in chunks of 50, and reports totals -
 it never computes a derived value itself. Requires a hub token with
 `tables:write` (or `full`/admin).
+
+The sweep pages candidates in id order and re-hashes them, passing rows found
+fresh; each table resumes after the id stored in `_derivation_cursors` (hub-owned
+operational state like the cooldowns), held back at the first row left
+unattempted (budget, limit, cooldown), so no row hides the rows after it. Scans
+share half the budget evenly across tables. A scan that runs out of its share,
+and rows past a call's limit or budget, are reported in `failed`, never dropped.
 
 Manual record Resolve uses `POST /v1/derive/resolve` with exactly one `ids`
 entry, `col` and required `expectedUpdatedAt`. The separate route makes older

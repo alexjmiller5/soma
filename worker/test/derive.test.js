@@ -834,3 +834,51 @@ test("a direct batch derives what its budget can commit and defers the rest befo
   const again = await deriveRows(db, env, "tracks", pending, { fetchImpl: s.fetchImpl });
   expect(s.calls.length).toBe(out.derived + again.derived);
 });
+
+// Prove every output of `ids` as of produced_at, then move the rows' clocks past it.
+async function proveAll(db, cols, ids, producedAt = "2026-01-02T00:00:00.000Z", bumped = "2026-02-01T00:00:00.000Z") {
+  for (const id of ids) {
+    const isrc = db.db.query("SELECT isrc FROM tracks WHERE id = ?").get(id).isrc;
+    for (const c of cols) db.db.query(`INSERT OR REPLACE INTO provenance (id, to_kind, to_ref, field, from_kind, from_ref, rel, asserted_by, inputs_hash, value_hash, produced_at)
+      VALUES (?, 'tracks', ?, ?, 'http:isrc', 'x', 'derived_from', 'hub', ?, ?, ?)`).run(`tracks:${id}:${c}`, id, c, await hex(JSON.stringify([isrc])), await hex(""), producedAt);
+  }
+  db.db.query("UPDATE tracks SET updated_at = ?").run(bumped);
+}
+
+test("the sweep passes fresh timestamp-bumped candidates to reach a stale row, and never reports success short of it", async () => {
+  const { db, cols, ids, env, fetchImpl } = await tracks(2);
+  for (let i = 50; i < 60; i++) db.db.query("INSERT INTO tracks (id, isrc, updated_at) VALUES (?, ?, '2026-01-01T00:00:00.000Z')").run(`t${i}`, `ISRCt${i}`);
+  await proveAll(db, cols, [...ids, ...Array.from({ length: 10 }, (_, i) => `t${50 + i}`)]);
+  db.db.exec("UPDATE tracks SET isrc = 'CHANGED' WHERE id = 't59'"); // the 60th row's input changed
+  const s = counted(fetchImpl);
+  for (let i = 0; i < 3 && !s.calls.length; i++) {
+    const out = await sweep(db, env, { fetchImpl: s.fetchImpl });
+    if (!s.calls.length) expect(out.failed.length).toBeGreaterThan(0);
+  }
+  expect(s.calls).toEqual(["t59"]);
+  expect(db.db.query("SELECT o0 FROM tracks WHERE id = 't59'").get().o0).toBe("v");
+});
+
+test("rows past the per-call limit are reported pending, never dropped silently", async () => {
+  const { db, ids, env, fetchImpl } = await tracks(2);
+  for (let i = 50; i < 60; i++) db.db.query("INSERT INTO tracks (id, isrc, updated_at) VALUES (?, ?, '2026-01-01T00:00:00.000Z')").run(`t${i}`, `ISRCt${i}`);
+  const all = [...ids, ...Array.from({ length: 10 }, (_, i) => `t${50 + i}`)];
+  const s = counted(fetchImpl);
+  const out = await deriveStale(db, env, "tracks", all.map((id) => ({ id })), { fetchImpl: s.fetchImpl });
+  expect(out.derived + new Set(out.failed.map((f) => f.id)).size).toBe(60);
+});
+
+test("a sweep whose scan share runs out says so and the next one resumes after it", async () => {
+  const { queryBudget } = await import("../src/write.js");
+  const { db, cols, ids, env, fetchImpl } = await tracks(2);
+  for (let i = 50; i < 60; i++) db.db.query("INSERT INTO tracks (id, isrc, updated_at) VALUES (?, ?, '2026-01-01T00:00:00.000Z')").run(`t${i}`, `ISRCt${i}`);
+  await proveAll(db, cols, [...ids, ...Array.from({ length: 10 }, (_, i) => `t${50 + i}`)]);
+  db.db.exec("UPDATE tracks SET isrc = 'CHANGED' WHERE id = 't59'");
+  const s = counted(fetchImpl);
+  const first = await sweep(queryBudget(db, 120), env, { fetchImpl: s.fetchImpl, page: 3 });
+  expect(s.calls).toEqual([]);
+  expect(first.failed).toEqual([{ table: "tracks", id: null, col: null, error: expect.stringContaining("resumes") }]);
+  const second = await sweep(queryBudget(db, 120), env, { fetchImpl: s.fetchImpl, page: 3 });
+  expect(s.calls).toEqual(["t59"]);
+  expect(second).toEqual({ derived: 1, failed: [] });
+});

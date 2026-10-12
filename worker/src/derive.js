@@ -13,7 +13,7 @@
 
 import { historyPlan } from "./history.js";
 import { checkedReads, commitChecked, enforcedRules, queryBudget } from "./write.js";
-import { canonicalSql, ident, legacySql, proofHashes, propertiesFor, qident, sha256hex, validateRow, storageRow } from "./validate.js";
+import { canonicalSql, ident, legacySql, literal, proofHashes, propertiesFor, qident, sha256hex, validateRow, storageRow } from "./validate.js";
 
 // A hung endpoint would otherwise stall the whole sequential sweep.
 const ENDPOINT_TIMEOUT_MS = 60_000;
@@ -22,6 +22,8 @@ const ENDPOINT_TIMEOUT_MS = 60_000;
 const COOLDOWNS = `CREATE TABLE IF NOT EXISTS _derivation_cooldowns (
   endpoint TEXT PRIMARY KEY, status INTEGER NOT NULL, retry_at INTEGER NOT NULL
 )`;
+// Where each table's sweep resumes: the id after which it scans next.
+const CURSORS = "CREATE TABLE IF NOT EXISTS _derivation_cursors (tbl TEXT PRIMARY KEY, after TEXT NOT NULL)";
 
 function retryAfter(res) {
   if (![429, 503].includes(res.status)) return null;
@@ -96,6 +98,9 @@ const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 // Reported for a row left for the next call or sweep: never fetched, so a
 // budget that cannot also cover the commit never wastes an external call.
 const PENDING = "derivation budget reached before this row; retry it";
+const LIMITED = "derivation limit reached before this row; the sweep retries it";
+const UNSCANNED = "derivation sweep budget reached before the end of this table; the next sweep resumes";
+const waiting = (f) => f.error === PENDING || f.error === LIMITED || /deferred by cooldown/.test(f.error);
 
 export function loadDerivations(env) {
   if (!env?.DERIVATIONS) return new Map();
@@ -298,29 +303,42 @@ async function provenanceHasHubAt(db) {
 // Judged on the stored rows in two reads per chunk, never one per cell: each
 // row's inputs rendered once per distinct input list (columns listing the same
 // inputs share it) in both accepted renderings, and every live proof.
+// Returns [id, names] for each stale row, in id order.
 async function staleWork(db, t, typeOf, byName, ids) {
   const props = [...byName.values()].flat();
   const lists = [...new Set(props.map((p) => JSON.stringify(p.inputs ?? [])))];
   const array = (render, list) => `json_array(${JSON.parse(list).map((c) => render(`t.${qident(c)}`, typeOf[c])).join(", ") || "NULL"})`;
-  const work = new Map();
+  const work = [];
   for (let i = 0; i < ids.length; i += 100) {
     const { results: rows } = await db.prepare(`SELECT t.id, ${lists.map((list, j) => `${array(canonicalSql, list)} AS "c${j}", ${array(legacySql, list)} AS "l${j}"`).join(", ")}
-      FROM ${qident(t)} t WHERE t.deleted_at IS NULL AND t.id IN (SELECT value FROM json_each(?))`)
+      FROM ${qident(t)} t WHERE t.deleted_at IS NULL AND t.id IN (SELECT value FROM json_each(?)) ORDER BY t.id`)
       .bind(JSON.stringify(ids.slice(i, i + 100))).all();
     const { results: proofs } = await db.prepare("SELECT id, inputs_hash FROM provenance WHERE deleted_at IS NULL AND id IN (SELECT value FROM json_each(?))")
       .bind(JSON.stringify(rows.flatMap((row) => props.map((p) => `${t}:${row.id}:${p.col}`)))).all();
     const proven = new Map(proofs.map((p) => [p.id, p.inputs_hash]));
     for (const row of rows) {
       const hashes = await Promise.all(lists.map((_, j) => Promise.all([sha256hex(row[`c${j}`]), sha256hex(row[`l${j}`])])));
-      for (const [name, cols] of byName) {
-        const fresh = (p) => hashes[lists.indexOf(JSON.stringify(p.inputs ?? []))].includes(proven.get(`${t}:${row.id}:${p.col}`));
-        if (cols.every(fresh)) continue;
-        if (!work.has(name)) work.set(name, []);
-        work.get(name).push(row.id);
-      }
+      const fresh = (p) => hashes[lists.indexOf(JSON.stringify(p.inputs ?? []))].includes(proven.get(`${t}:${row.id}:${p.col}`));
+      const names = [...byName].filter(([, cols]) => !cols.every(fresh)).map(([name]) => name);
+      if (names.length) work.push([row.id, names]);
     }
   }
   return work;
+}
+
+// Derive stale rows ([id, names] from staleWork), at most `limit` per
+// derivation; the rest is reported pending, never dropped silently.
+async function deriveWork(db, env, t, byName, stale, { fetchImpl, limit }) {
+  const out = { derived: 0, failed: [] };
+  for (const [name, cols] of byName) {
+    const ids = stale.filter(([, names]) => names.includes(name)).map(([id]) => id);
+    for (const id of ids.slice(limit)) out.failed.push({ id, col: cols[0].col, error: LIMITED });
+    if (!ids.length) continue;
+    const r = await deriveRows(db, env, t, ids.slice(0, limit), { fetchImpl, names: new Set([name]) });
+    out.derived += r.derived;
+    out.failed.push(...r.failed);
+  }
+  return out;
 }
 
 // Derive only what needs it, for the rows with these ids (the on-push path).
@@ -329,38 +347,33 @@ async function staleWork(db, t, typeOf, byName, ids) {
 export async function deriveStale(db, env, table, rows, { fetchImpl = fetch, limit = 50 } = {}) {
   db = queryBudget(db,900);
   const t = ident(table);
-  const out = { derived: 0, failed: [] };
   try {
     const { typeOf, byName } = await derivationProps(db, t);
-    if (!byName.size) return out;
-    for (const [name, ids] of await staleWork(db, t, typeOf, byName, [...new Set(rows.map((row) => row.id))])) {
-      const r = await deriveRows(db, env, t, ids.slice(0, limit), { fetchImpl, names: new Set([name]) });
-      out.derived += r.derived;
-      out.failed.push(...r.failed);
-    }
+    if (!byName.size) return { derived: 0, failed: [] };
+    const stale = await staleWork(db, t, typeOf, byName, [...new Set(rows.map((row) => row.id))]);
+    return await deriveWork(db, env, t, byName, stale, { fetchImpl, limit });
   } catch (e) {
+    // Only setup and freshness reads run outside deriveRows: nothing derived yet.
     if (!String(e).includes('life_write_budget')) throw e;
-    out.failed.push(...rows.map(row=>({id:row.id,col:null,error:String(e)})));
+    return { derived: 0, failed: rows.map(row=>({id:row.id,col:null,error:String(e)})) };
   }
-  return out;
 }
 
-// Cheap SQL prefilter: rows with no provenance for this column, or whose
-// updated_at moved past it. staleWork then re-hashes to decide for real.
-async function candidates(db, table, col, limit) {
-  const { results } = await db
-    .prepare(
-      `SELECT t.* FROM ${qident(table)} t
-       LEFT JOIN provenance p ON p.id = ? || ':' || t.id || ':' || ? AND p.deleted_at IS NULL
-       WHERE t.deleted_at IS NULL AND (p.id IS NULL OR t.updated_at > p.produced_at)
-       LIMIT ?`
-    )
-    .bind(table, col, limit)
-    .all();
-  return results ?? [];
+// One page of candidates in id order after `after`: rows with a derived column
+// lacking a live proof newer than the row. A cheap prefilter only; staleWork
+// re-hashes to decide, and the continuation passes rows it found fresh.
+async function candidates(db, t, props, after, limit) {
+  const unproven = props.map((p) => `NOT EXISTS (SELECT 1 FROM provenance p WHERE p.id = ${literal(`${t}:`)} || t.id || ${literal(`:${p.col}`)}
+    AND p.deleted_at IS NULL AND p.produced_at >= t.updated_at)`).join(" OR ");
+  const { results } = await db.prepare(`SELECT t.id FROM ${qident(t)} t WHERE t.deleted_at IS NULL AND t.id > ? AND (${unproven}) ORDER BY t.id LIMIT ?`)
+    .bind(after, limit).all();
+  return (results ?? []).map((row) => row.id);
 }
 
-export async function sweep(db, env, { limit = 50, fetchImpl = fetch } = {}) {
+// Each table resumes where its last sweep stopped, so rows found fresh (or
+// failing on every attempt) never hide the rows after them. The scans share
+// half the budget evenly across tables; derivations get the rest.
+export async function sweep(db, env, { limit = 50, fetchImpl = fetch, page = 200 } = {}) {
   db = queryBudget(db,900);
   const out = { derived: 0, failed: [] };
   const catalog = await db
@@ -368,20 +381,42 @@ export async function sweep(db, env, { limit = 50, fetchImpl = fetch } = {}) {
     .first();
   if (!catalog) return out; // a hub with no catalog yet
   const { results: tables } = await db
-    .prepare("SELECT DISTINCT tbl FROM catalog_properties WHERE deleted_at IS NULL AND derived_by LIKE 'http:%'")
+    .prepare("SELECT DISTINCT tbl FROM catalog_properties WHERE deleted_at IS NULL AND derived_by LIKE 'http:%' ORDER BY tbl")
     .all();
-  for (const { tbl } of tables ?? []) {
+  if (!tables?.length) return out;
+  await db.prepare(CURSORS).run();
+  const cursors = new Map(((await db.prepare("SELECT tbl, after FROM _derivation_cursors").all()).results ?? []).map((r) => [r.tbl, r.after]));
+  const floor = Math.floor(db.remaining() / 2);
+  for (const [i, { tbl }] of tables.entries()) {
     try {
       const t = ident(tbl);
-      const { byName } = await derivationProps(db, t);
-      const rows = new Map();
-      for (const cols of byName.values()) {
-        for (const p of cols) for (const row of await candidates(db, t, p.col, limit)) rows.set(row.id, row);
+      const { typeOf, byName } = await derivationProps(db, t);
+      const props = [...byName.values()].flat();
+      const stopAt = db.remaining() - Math.max(0, db.remaining() - floor) / (tables.length - i);
+      const start = cursors.get(t) ?? "", seen = [start], stale = [];
+      let after = start, end = false;
+      while (stale.length < limit && db.remaining() - 3 >= stopAt) {
+        const ids = await candidates(db, t, props, after, page);
+        end = ids.length < page;
+        const names = new Map(await staleWork(db, t, typeOf, byName, ids));
+        for (const id of ids) {
+          seen.push(id);
+          after = id;
+          if (names.has(id)) stale.push([id, names.get(id)]);
+          if (stale.length >= limit) { end = false; break; }
+        }
+        if (end) break;
       }
-      if (!rows.size) continue;
-      const r = await deriveStale(db, env, t, [...rows.values()], { fetchImpl, limit });
+      if (!end && stale.length < limit) out.failed.push({ table: t, id: null, col: null, error: UNSCANNED });
+      const r = await deriveWork(db, env, t, byName, stale, { fetchImpl, limit });
       out.derived += r.derived;
       out.failed.push(...r.failed);
+      // Resume at the first row left unattempted, else past every row handled.
+      const held = r.failed.filter(waiting).map((f) => seen.indexOf(f.id)).filter((at) => at > 0);
+      const next = held.length ? seen[Math.min(...held) - 1] : end ? "" : after;
+      if (next !== start) {
+        await db.prepare("INSERT INTO _derivation_cursors (tbl, after) VALUES (?, ?) ON CONFLICT(tbl) DO UPDATE SET after = excluded.after").bind(t, next).run();
+      }
     } catch (e) {
       if (!String(e).includes('life_write_budget')) throw e;
       out.failed.push({table:tbl,id:null,col:null,error:String(e)});
