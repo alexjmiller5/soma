@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import worker from "../src/main.js";
 import { hashToken, ensureAuthReady } from "../src/auth.js";
 import { D1Shim } from "./d1shim.js";
+import { ChangeSignal } from "../src/changes.js";
 
 // Every D1 call from a Worker is a network round trip (~45 ms from the edge to
 // the database), so a replica's read requests must not re-run idempotent setup
@@ -200,4 +201,88 @@ test("write routes still install governance storage for tables created after the
   await call("/v1/rows/push", { table: "later", columns: ["id", "name", "updated_at"], rows: [{ id: "a", name: "A", updated_at: "2026-01-01T00:00:00.000Z" }] });
   const triggers = env.DB.db.query("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='later' AND name GLOB '_governance_rows_*'").all();
   expect(triggers.length).toBeGreaterThan(0);
+});
+
+// --- subscription long polls -------------------------------------------------
+// Page Archiver and Media Center's offline job each hold ~120 polls an hour.
+// Re-reading the subscription and its events every second cost three D1
+// statements per held second; a held poll waits on the change signal instead.
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function changeSignal() {
+  const data = new Map(), loading = [];
+  const signal = new ChangeSignal({
+    storage: { get: async (k) => data.get(k), put: async (k, v) => void data.set(k, v) },
+    blockConcurrencyWhile: (fn) => loading.push(fn()),
+    getWebSockets: () => [],
+  });
+  await Promise.all(loading);
+  return { idFromName: (name) => name, get: () => ({ fetch: (url, init) => signal.fetch(new Request(url, init)) }) };
+}
+
+async function subscribed() {
+  const { env, call } = await hub();
+  env.CHANGES = await changeSignal();
+  env.DB.db.exec("CREATE TABLE catalog_tables (id TEXT PRIMARY KEY, kind TEXT, deleted_at TEXT); INSERT INTO catalog_tables VALUES ('people', 'table', NULL)");
+  const created = await worker.fetch(new Request("https://hub.test/v1/subscriptions", {
+    method: "POST", headers: { Authorization: "Bearer root" },
+    body: JSON.stringify({ label: "Cost", start: "now", sources: [{ table: "people", columns: ["name"] }] }),
+  }), env, { waitUntil() {} });
+  const { id } = await created.json();
+  await env.AUTH_DB.prepare("INSERT INTO _tokens (hash, name, scopes) VALUES (?, ?, ?)")
+    .bind(await hashToken("t-consumer"), "consumer", `subscriptions:consume:${id},tables:read:people`).run();
+  const poll = (wait, signal) => worker.fetch(new Request(`https://hub.test/v1/subscriptions/${id}/events?wait=${wait}`, {
+    headers: { Authorization: "Bearer t-consumer" }, signal,
+  }), env, { waitUntil() {} });
+  const bump = (tables) => env.CHANGES.get().fetch("https://change-signal/", { method: "POST", body: JSON.stringify({ tables }) });
+  expect((await poll(0)).status).toBe(200); // the isolate's first poll
+  return { env, id, poll, bump, call };
+}
+
+test("an idle subscription long poll reads D1 a constant number of times, not three a second", async () => {
+  const { env, id, poll } = await subscribed();
+  env.DB.statements = [];
+  const started = Date.now();
+  const response = await poll(3);
+  expect(await response.json()).toEqual({ subscription_id: id, delivery_id: null, through_seq: "0", events: [] });
+  expect(Date.now() - started).toBeGreaterThanOrEqual(2900);
+  console.log(`idle 3 s subscription poll: statements=${env.DB.statements.length}`);
+  // Before: 14 - the route's own load, then the subscription and its events
+  // re-read at 0, 1, 2 and 3 s. Now: the load, a check at the start and one at
+  // the deadline.
+  expect(env.DB.statements.length).toBeLessThanOrEqual(8);
+});
+
+test("commits to unwatched tables do not wake a held subscription poll", async () => {
+  const { env, poll, bump } = await subscribed();
+  env.DB.statements = [];
+  const held = poll(2);
+  for (let i = 0; i < 5; i++) { await sleep(200); await bump(["notes"]); }
+  expect((await (await held).json()).events).toEqual([]);
+  expect(env.DB.statements.length).toBeLessThanOrEqual(8);
+});
+
+test("a commit to a watched table wakes a held subscription poll at once", async () => {
+  const { poll, call } = await subscribed();
+  const started = Date.now();
+  const held = poll(5);
+  await sleep(200);
+  await call("/v1/rows/push", { table: "people", columns: ["id", "name", "updated_at"], rows: [{ id: "a", name: "Ada", updated_at: "2026-01-01T00:00:00.000Z" }] });
+  const body = await (await held).json();
+  expect(body.events.map((e) => e.changes)).toEqual([[{ column: "name", old_value: null, new_value: "Ada" }]]);
+  // Before: the next once-a-second re-read found it, about 1 s in.
+  expect(Date.now() - started).toBeLessThan(800);
+});
+
+test("a cancelled subscription poll stops waiting and answers 499", async () => {
+  const { poll } = await subscribed();
+  const controller = new AbortController(), started = Date.now();
+  const held = poll(5, controller.signal);
+  await sleep(100);
+  controller.abort();
+  const response = await held;
+  expect(response.status).toBe(499);
+  expect(await response.json()).toEqual({ error: "request_cancelled" });
+  expect(Date.now() - started).toBeLessThan(1000);
 });

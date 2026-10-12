@@ -340,3 +340,49 @@ test("without push configuration a change never schedules a push", async () => {
   expect(pushes).toBe(0);
   expect(await store.get("nextPush")).toBeUndefined();
 });
+
+// --- table-filtered waits ----------------------------------------------------
+// Subscription long polls wait for commits naming their source tables only, so
+// every other commit on the hub costs them nothing.
+
+// The seq a wait answers within half a second, or "held".
+const soon = (seq) => Promise.race([seq, sleep(500).then(() => "held")]);
+
+test("a waiter for named tables sleeps through other tables' commits", async () => {
+  const s = await signal();
+  const held = seqOf(wait(s, "since=0&wait=25&table=articles"));
+  await bumpTables(s, ["notes"]);
+  expect(await soon(held)).toBe("held");
+  await bumpTables(s, ["Articles"]); // SQLite table names ignore case
+  expect(await soon(held)).toBe(2);
+});
+
+test("a waiter for named tables returns at once for a change it could have missed", async () => {
+  const store = storage();
+  const s = await signal(store);
+  await bumpTables(s, ["articles"]);
+  await bumpTables(s, ["notes"]);
+  // Committed after the caller read its sequence, before it waited.
+  expect(await soon(seqOf(wait(s, "since=0&wait=25&table=articles")))).toBe(2);
+  // Only an unrelated change since: held until the wait runs out.
+  const started = Date.now();
+  expect(await seqOf(wait(s, "since=1&wait=0.3&table=articles"))).toBe(2);
+  expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+  // An evicted object lost which tables earlier commits named, and a commit
+  // that names none may have touched any: both count as a change.
+  const reloaded = await signal(store);
+  expect(await soon(seqOf(wait(reloaded, "since=1&wait=25&table=articles")))).toBe(2);
+  const held = seqOf(wait(reloaded, "since=2&wait=25&table=articles"));
+  await bump(reloaded);
+  expect(await soon(held)).toBe(3);
+});
+
+test("a purge names the tables it hard-deleted from", async () => {
+  const CHANGES = await tablesBinding(), env = { CHANGES }, db = await peopleDb();
+  await db.prepare("CREATE TABLE purges (id TEXT PRIMARY KEY, tbl TEXT, row_id TEXT, col TEXT, purged_at TEXT, created_at TEXT, updated_at TEXT, deleted_at TEXT, hub_at TEXT)").run();
+  await push(env, db, [{ id: "a", name: "Ada", updated_at: T1 }]);
+  await inRequest(env, () => ROUTES["/v1/rows/push"]({ table: "purges", columns: ["id", "tbl", "row_id", "col", "purged_at", "updated_at"],
+    rows: [{ id: "m", tbl: "people", row_id: "a", col: null, purged_at: T2, updated_at: T2 }] }, db, env));
+  expect((await db.prepare("SELECT id FROM people").all()).results).toEqual([]);
+  expect(CHANGES.bodies.map((b) => b.tables)).toEqual([["people"], ["purges"], ["people"]]);
+});

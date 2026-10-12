@@ -35,18 +35,33 @@ export class ChangeSignal {
     this.waiters = new Set();
     this.pending = null; // tables changed since the last socket message
     this.deliver = deliverBackgroundPush;
+    // Lowercased table -> the last seq whose commit named it. In memory only:
+    // a seq from before this object loaded, or a commit naming no table, may
+    // have touched any table.
+    this.named = new Map();
+    this.unnamed = 0;
     // Clients ping to notice a dead connection; the runtime answers without
     // waking a hibernated object.
     state.setWebSocketAutoResponse?.(new WebSocketRequestResponsePair("ping", "pong"));
     state.blockConcurrencyWhile(async () => {
-      this.seq = (await state.storage.get("seq")) ?? 0;
+      this.seq = this.loaded = (await state.storage.get("seq")) ?? 0;
     });
+  }
+
+  // Whether a commit after `since` may have touched one of `tables`.
+  touched(since, tables) {
+    if (since === this.seq) return false;
+    if (!(since >= this.loaded && since < this.seq) || this.unnamed > since) return true;
+    return tables.some((t) => (this.named.get(t) ?? 0) > since);
   }
 
   async fetch(request) {
     if (request.method === "POST") {
       const { tables } = await request.json().catch(() => ({}));
       this.seq += 1;
+      const named = Array.isArray(tables) ? tables.filter((t) => typeof t === "string") : [];
+      if (!named.length) this.unnamed = this.seq;
+      for (const table of named) this.named.set(table.toLowerCase(), this.seq);
       await this.state.storage.put("seq", this.seq);
       for (const wake of [...this.waiters]) wake();
       if (!this.pending) {
@@ -64,14 +79,19 @@ export class ChangeSignal {
     }
     const params = new URL(request.url).searchParams;
     const wait = Math.min(Number(params.get("wait")) || 0, MAX_WAIT);
-    if (params.get("since") === String(this.seq) && wait > 0) {
+    // `table` (repeatable) holds the waiter until a commit names one of them.
+    const tables = params.getAll("table").map((t) => t.toLowerCase());
+    const since = params.get("since");
+    const quiet = () => (tables.length ? !this.touched(Number(since), tables) : since === String(this.seq));
+    if (since !== null && wait > 0 && quiet()) {
       await new Promise((resolve) => {
-        const wake = () => {
+        const done = () => {
           clearTimeout(timer);
           this.waiters.delete(wake);
           resolve();
         };
-        const timer = setTimeout(wake, wait * 1000);
+        const wake = () => quiet() || done();
+        const timer = setTimeout(done, wait * 1000);
         this.waiters.add(wake);
       });
     }
@@ -139,6 +159,22 @@ const scope = new AsyncLocalStorage();
 
 export function withChangeSignal(env, ctx, fn) {
   return scope.run({ env, ctx }, fn);
+}
+
+// Subscription long polls wait on the signal instead of re-reading D1:
+// wait(null, [], 0) reads the current seq; wait(seq, tables, seconds) holds
+// until a commit after seq names one of tables, or seconds (capped at
+// MAX_WAIT) run out, and returns the seq then. Null without the binding.
+export function changeWaiter() {
+  const env = scope.getStore()?.env;
+  if (!env?.CHANGES) return null;
+  return async (since, tables, seconds) => {
+    const query = new URLSearchParams({ wait: String(Math.min(seconds, MAX_WAIT)) });
+    if (since !== null) query.set("since", String(since));
+    for (const table of tables) query.append("table", table);
+    const response = await stub(env).fetch(`https://change-signal/?${query}`);
+    return (await response.json()).seq;
+  };
 }
 
 export function markChanged(tables = []) {

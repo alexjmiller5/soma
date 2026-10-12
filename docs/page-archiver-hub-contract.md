@@ -52,8 +52,9 @@ update, accepted derivation, soft/hard delete; omit rejected/stale/noop/timestam
 changes. Capacity/event-size limits reject mutations transactionally rather than
 silently discarding events. Pending events never expire or get pruned implicitly.
 
-GET /v1/subscriptions/<id>/events?wait=30 holds at most 30 seconds, checks once a
-second, returns at most 100 events and 1 MiB. Persist delivery_id and through_seq
+GET /v1/subscriptions/<id>/events?wait=30 holds at most 30 seconds, wakes when a
+commit names a selected source table (rechecking at least every 25 seconds and at
+the deadline), returns at most 100 events and 1 MiB. Persist delivery_id and through_seq
 before offering a nonempty batch. Until ACK, return the identical batch. Empty
 responses have null delivery_id, current acked_seq as through_seq, and events [].
 Paused and drained retired subscriptions honor the same wait on empty responses.

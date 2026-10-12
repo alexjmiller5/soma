@@ -736,10 +736,10 @@ is the only timer. The hub bumps the sequence through `markChanged(tables)` from
 `withChangeSignal`, which wraps every request and cron run: `commitChecked`
 marks only a non-probe commit with transitions (so no-op, stale and rejected
 pushes never wake replicas - a re-pushing replica would otherwise loop every
-replica), and schema push (`_schema_log`), row creation and changeset commits
-mark explicitly, each naming the tables it committed. A new writer that
-bypasses those must call `markChanged(tables)` too;
-a missed bump costs up to `SAFETY_SECONDS`. Our own push echoes back one
+replica), and schema push (`_schema_log`), row creation, changeset commits and
+purge hard deletes mark explicitly, each naming the tables it committed. A new
+writer that bypasses those must call `markChanged(tables)` too;
+a missed bump costs up to `SAFETY_SECONDS` (a held subscription poll, `MAX_WAIT`). Our own push echoes back one
 quiet round. Both loops reset their file fingerprint after a round, which
 also absorbs a local write made while it ran, so after a clean round
 `pending_local_writes` (a dirty receipt, or a row stamped between the round's
@@ -1203,7 +1203,12 @@ watched source tables, preserving existing columns and the entire source/outbox
 trigger set. Rowid aliases and `hub_at` additions remain protected because they
 change revision semantics. Other structural changes require retiring affected subscriptions. Private operational
 DDL never enters the replica schema log or catalog. `durable-pull-v1` delivers persisted offered batches through capped long polls
-and explicit ACK receipts. Consumers need the subscription grant plus read access
+and explicit ACK receipts. A held poll reads `ChangeSignal`'s seq, then D1, then
+waits on the object (`table` params: its source tables) for a commit naming one;
+it re-checks D1 only on that wake, every `MAX_WAIT` and at the deadline, so an
+idle poll costs a constant few statements. The object keeps each table's last seq
+in memory only: an older seq or a bump naming no table counts as a change.
+Without the binding, or once a wait fails, the poll re-reads D1 every second. Consumers need the subscription grant plus read access
 to every source. Live auth is rechecked before release; GET never advances ACK.
 Empty retired subscriptions honor the requested wait. Admin selects immutable
 sources at creation and can pause/resume or permanently retire recording.

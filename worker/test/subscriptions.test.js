@@ -386,6 +386,31 @@ test('long poll wakes on a committed event, holds at most 30s, and rechecks revo
   expect(b.env.DB.db.query('SELECT acked_seq FROM _change_subscriptions').get().acked_seq).toBe(0);
 });
 
+test('a commit between the D1 check and the change-signal wait wakes the poll at once; a failed signal falls back to polling',async()=>{
+  const {pollEvents}=await import('../src/subscriptions.js');
+  const {ChangeSignal,changeWaiter,withChangeSignal}=await import('../src/changes.js');
+  const a=await api(),tenant=await a.tenant(),data=new Map(),loading=[];
+  const signal=new ChangeSignal({storage:{get:async k=>data.get(k),put:async(k,v)=>void data.set(k,v)},blockConcurrencyWhile:fn=>loading.push(fn()),getWebSockets:()=>[]});
+  await Promise.all(loading);
+  let checked=false,committed=false;const prepare=a.env.DB.prepare.bind(a.env.DB);
+  a.env.DB.prepare=sql=>{if(/FROM _change_events e/.test(sql))checked=true;return prepare(sql);};
+  const pending=[],env={CHANGES:{idFromName:n=>n,get:()=>({fetch:(url,init)=>signal.fetch(new Request(url,init))})}};
+  const started=Date.now();
+  const response=await withChangeSignal(env,{waitUntil:p=>pending.push(p)},()=>{
+    const real=changeWaiter();
+    // The commit (and its bump) lands after the first check, before any later signal read.
+    return pollEvents(tenant,a.sub.id,5,{changes:async(...args)=>{
+      if(checked && !committed){committed=true;await write(a.env.DB,change('a','https://example.test/a',1));await Promise.all(pending);}
+      return real(...args);
+    }});
+  });
+  expect((await response.json()).events).toHaveLength(1);
+  expect(Date.now()-started).toBeLessThan(2000);
+  const b=await api();let now=0,sleeps=0;
+  const fallback=await pollEvents(await b.tenant(),b.sub.id,30,{now:()=>now,sleep:async ms=>{now+=ms;sleeps++;},changes:async()=>{throw new Error('down');}});
+  expect((await fallback.json()).events).toEqual([]);expect(now).toBe(30_000);expect(sleeps).toBe(30);
+});
+
 test('pause retains recording and offered delivery; retirement preserves pending work and releases schema guard',async()=>{
   const a=await api();await write(a.env.DB,change('a','https://example.test/a',1));
   const offered=await (await a.call(a.path+'/events?wait=0',{token:a.token})).json();

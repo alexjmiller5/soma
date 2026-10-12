@@ -5,6 +5,7 @@ import { qident } from "./validate.js";
 import { redactReceipts } from './governance-store.js';
 import {ScopeDenied} from './scopes.js';
 import {purgeChangesets} from './changeset-store.js';
+import {markChanged} from './changes.js';
 
 export const PURGES = "purges";
 
@@ -85,5 +86,8 @@ export async function applyPurges(db, markers) {
         : db.prepare("DELETE FROM history WHERE tbl = ? AND row_id = ? AND col = ? AND created_at <= ?").bind(tbl, row_id, col, purged_at));
     }
   }
-  if (stmts.length) await db.batch(stmts);
+  if (!stmts.length) return;
+  await db.batch(stmts);
+  // A hard delete records subscription events like any other commit.
+  markChanged(live.map((m) => m.tbl));
 }

@@ -1,5 +1,6 @@
 import { authorizeTable, broadTableAccess, ScopeDenied } from './scopes.js';
 import { MAX_DELIVERY_BYTES } from './subscription-triggers.js';
+import { changeWaiter } from './changes.js';
 
 export const subscriptionReply = (body,status=200) => Response.json(body,{status,headers:{'Cache-Control':'no-store'}});
 export class SubscriptionError extends Error {
@@ -84,8 +85,22 @@ function sleep(ms,signal) {
     if(signal?.aborted) finish(); else signal?.addEventListener('abort',finish,{once:true});
   });
 }
-export async function pollEvents(tenant,id,seconds,{now=Date.now,sleep:pause=sleep,signal}={}) {
+// Settles undefined when the wait fails or the caller disconnects; a held
+// signal wait then times out on its own.
+function waited(promise,signal) {
+  const failed=promise.catch(error=>{console.log(JSON.stringify({subscription_wait_error:String(error)}));});
+  return signal ? Promise.race([failed,new Promise(resolve=>{
+    if(signal.aborted) resolve(); else signal.addEventListener('abort',()=>resolve(),{once:true});
+  })]) : failed;
+}
+// D1 is read at the start, when the change signal reports a commit naming a
+// source table, every MAX_WAIT seconds (covering a lost bump) and at the
+// deadline. The seq is read BEFORE each check, so a commit the check misses
+// bumps past it and the wait returns at once. Without the signal (or once it
+// fails) the poll re-reads every second.
+export async function pollEvents(tenant,id,seconds,{now=Date.now,sleep:pause=sleep,signal,changes=changeWaiter()}={}) {
   const deadline=now()+seconds*1000;
+  let seq=changes && seconds>0 ? await waited(changes(null,[],0),signal) : undefined;
   for(;;) {
     if(signal?.aborted) throw new SubscriptionError(499,'request_cancelled');
     const snapshot=await offer(tenant.db,await loadSubscription(tenant,id));
@@ -95,7 +110,9 @@ export async function pollEvents(tenant,id,seconds,{now=Date.now,sleep:pause=sle
       if(signal?.aborted) throw new SubscriptionError(499,'request_cancelled');
       return subscriptionReply(snapshot.body);
     }
-    await pause(Math.min(1000,Math.max(0,deadline-now())),signal);
+    const left=Math.max(0,deadline-now());
+    if(seq!==undefined) seq=await waited(changes(seq,JSON.parse(snapshot.sub.sources_json).map(s=>s.table),left/1000),signal);
+    if(seq===undefined) await pause(Math.min(1000,left),signal);
   }
 }
 
