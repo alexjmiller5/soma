@@ -131,7 +131,7 @@ test('a suppressed insert cannot become a false inserted or existing receipt', a
 
 test('only actual insertions can trigger derivations', async () => {
   const db = fresh();
-  db.db.exec(`UPDATE catalog_properties SET derived_by=NULL;
+  db.db.exec(`UPDATE catalog_properties SET derived_by=NULL; ALTER TABLE provenance ADD COLUMN detail TEXT;
     INSERT INTO catalog_properties(id,tbl,col,type,derived_by,inputs) VALUES ('label','items','label','text','http:label','["name"]');
     INSERT INTO items(id,name,updated_at) VALUES ('existing','saved','${T0}');`);
   const calls = [], pending = [];

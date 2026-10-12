@@ -55,7 +55,7 @@ function stub(reply) {
 test("loadDerivations parses the secret and is empty when unset", () => {
   expect(loadDerivations({}).size).toBe(0);
   const m = loadDerivations(ENV);
-  expect(m.get("tmdb_movie")).toEqual({ url: "https://derivations.example/movie", headers: { "Modal-Key": "key-1" } });
+  expect(m.get("tmdb_movie")).toEqual({ url: "https://derivations.example/movie", headers: { "Modal-Key": "key-1" }, refreshDays: null, noDataDays: 7 });
   expect(m.get("blurb").headers).toEqual({});
 });
 
@@ -132,11 +132,12 @@ test("keys that are not derived columns of this derivation are ignored", async (
   const { fetchImpl } = stub({ body: { status: "Nope", _source_ref: "x" } });
 
   const out = await deriveRows(db, ENV, "movies", ["78"], { fetchImpl });
-  expect(out).toEqual({ derived: 0, failed: [] });
+  expect(out).toEqual({ derived: 1, failed: [] }); // a completed lookup with no data for its outputs
   const row = await db.prepare("SELECT * FROM movies WHERE id='78'").first();
   expect(row.status).toBe("Not Started");
   expect(row.title).toBe(null);
-  expect((await db.prepare("SELECT count(*) AS n FROM provenance").first()).n).toBe(0);
+  expect(db.db.query("SELECT field, detail FROM provenance ORDER BY field").all())
+    .toEqual([{ field: "genres", detail: '{"no_data":true}' }, { field: "title", detail: '{"no_data":true}' }]);
 });
 
 test("a value failing its property check is not written; siblings still are", async () => {
@@ -932,4 +933,47 @@ test("an input change in the same millisecond as the proof still re-derives", as
   await sweep(db, env, { fetchImpl });
   expect(calls.map(([name]) => name)).toContain("deezer");
   expect(db.db.query("SELECT year FROM songs").get().year).toBe(2001);
+});
+
+const NO_DATA = '{"no_data":true}';
+
+test("a completed lookup without an output records a no-data proof, keeps the observed value and is not retried", async () => {
+  const db = await fresh();
+  db.db.exec("UPDATE movies SET genres = '[\"Observed\"]' WHERE id = '78'");
+  const s = stub({ body: { _source_ref: "tmdb:movie/78@2026-09-04" } }); // a 200 no-match
+  expect(await deriveRows(db, ENV, "movies", ["78"], { fetchImpl: s.fetchImpl })).toEqual({ derived: 1, failed: [] });
+  const row = db.db.query("SELECT title, genres, updated_at FROM movies WHERE id = '78'").get();
+  expect(row).toEqual({ title: null, genres: '["Observed"]', updated_at: "2026-09-04T00:00:00.000Z" });
+  const proofs = db.db.query("SELECT field, from_ref, detail, inputs_hash, value_hash FROM provenance ORDER BY field").all();
+  expect(proofs).toEqual([
+    { field: "genres", from_ref: "tmdb:movie/78@2026-09-04", detail: NO_DATA, inputs_hash: await hex('["78"]'), value_hash: await hex('["Observed"]') },
+    { field: "title", from_ref: "tmdb:movie/78@2026-09-04", detail: NO_DATA, inputs_hash: await hex('["78"]'), value_hash: await hex("") },
+  ]);
+  for (let i = 0; i < 2; i++) expect(await sweep(db, ENV, { fetchImpl: s.fetchImpl })).toEqual({ derived: 0, failed: [] });
+  expect(s.calls).toHaveLength(1);
+  // A later match replaces the no-data proof with an ordinary one.
+  await deriveRows(db, ENV, "movies", ["78"], { fetchImpl: stub({ body: { title: "Blade Runner", genres: [] } }).fetchImpl });
+  expect(db.db.query("SELECT detail FROM provenance WHERE field = 'title'").get().detail).toBe(null);
+});
+
+test("refresh is bounded: no-data proofs after no_data_refresh_days, value proofs only with refresh_days", async () => {
+  const db = await fresh();
+  const age = () => db.db.exec("UPDATE provenance SET produced_at = '2020-01-01T00:00:00.000Z'");
+  let s = stub({ body: {} });
+  await deriveRows(db, ENV, "movies", ["78"], { fetchImpl: s.fetchImpl });
+  age();
+  s = stub({ body: { title: "Blade Runner", genres: [] } });
+  expect(await sweep(db, ENV, { fetchImpl: s.fetchImpl })).toEqual({ derived: 1, failed: [] });
+  expect(s.calls).toHaveLength(1);
+  age();
+  expect(await sweep(db, ENV, { fetchImpl: s.fetchImpl })).toEqual({ derived: 0, failed: [] });
+  expect(s.calls).toHaveLength(1);
+  const endpoints = JSON.parse(ENV.DERIVATIONS);
+  endpoints.tmdb_movie.refresh_days = 30;
+  expect(await sweep(db, { DERIVATIONS: JSON.stringify(endpoints) }, { fetchImpl: s.fetchImpl })).toEqual({ derived: 1, failed: [] });
+  expect(s.calls).toHaveLength(2);
+  endpoints.tmdb_movie.no_data_refresh_days = 4000; // a no-data proof younger than this stays fresh
+  await deriveRows(db, ENV, "movies", ["78"], { fetchImpl: stub({ body: {} }).fetchImpl });
+  age();
+  expect(await sweep(db, { DERIVATIONS: JSON.stringify(endpoints) }, { fetchImpl: s.fetchImpl })).toEqual({ derived: 0, failed: [] });
 });

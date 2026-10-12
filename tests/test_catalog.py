@@ -698,6 +698,27 @@ def test_check_reports_stale_and_underived(db):
     assert ("slug", "stale") in rules_hit and ("genres", "underived") in rules_hit
 
 
+def test_check_counts_a_hub_no_data_proof_as_derived_and_fresh(db):
+    """A hub lookup that completed without data for a column writes a no-data
+    proof over the value it left in place: not underived, not stale."""
+    _movies(db)
+    insert_rows(db, "movies", [{"id": "m1", "title": "x", "tmdb_id": "78"}])
+    with connect(db) as conn:
+        for col, inputs in (("genres", ["tmdb_id"]), ("slug", ["title"])):
+            conn.execute(
+                "INSERT INTO provenance (id, to_kind, to_ref, field, from_kind, from_ref, rel, asserted_by, detail, inputs_hash, value_hash, produced_at) "
+                "VALUES (?, 'movies', 'm1', ?, 'http:x', 'x', 'derived_from', 'hub', '{\"no_data\":true}', ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                (
+                    f"movies:m1:{col}",
+                    col,
+                    inputs_hash(conn, "movies", "m1", inputs),
+                    value_hash(conn, "movies", "m1", col),
+                ),
+            )
+        conn.commit()
+    assert [f for f in check(db) if f["col"] in ("genres", "slug")] == []
+
+
 # --- audit --------------------------------------------------------------------
 
 

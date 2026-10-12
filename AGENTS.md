@@ -549,7 +549,8 @@ reads never provision either store or rewrite saved definitions.
 - **`provenance` is ONE table for every value's origin.** Hub derivations
   write rows with `rel='derived_from'`, `asserted_by='hub'`, `from_kind =
   'http:<name>'`, `from_ref = _source_ref ?? inputs_hash`, id
-  `<to_kind>:<to_ref>:<field>`, plus `inputs_hash`/`value_hash`/`produced_at`.
+  `<to_kind>:<to_ref>:<field>`, plus `inputs_hash`/`value_hash`/`produced_at`
+  and `detail` `{"no_data":true}` for a lookup that completed without data.
   Clients write observation edges into the same table (a text, an email, a
   photo, an import backing a row or one column: `rel` evidence_of /
   mentions / imported_from, `field` = the column or NULL for the whole row,
@@ -914,10 +915,16 @@ is the backup, `*/15 * * * *` is the derivation sweep (`SWEEP_CRON` in
 
 Derivations (`worker/src/derive.js`). `derived_by = "http:<name>"` resolves
 ONLY through the `DERIVATIONS` Worker secret - a JSON object
-`{name: {url, headers}}`. **No external source may be named in `worker/src`.**
+`{name: {url, headers, refresh_days?, no_data_refresh_days?}}`. **No external
+source may be named in `worker/src`.**
 The hub POSTs `{tbl, id, inputs:{col: value}}` and writes back the response
 keys that are derived columns of that derivation (plus `_source_ref`);
-anything else is ignored. Output runs through `validateRow` first - a value
+anything else is ignored. A 2xx object is a completed lookup: each derived
+column it omits gets a no-data proof (`detail` `{"no_data":true}`, `value_hash`
+of the value left in place, which is never cleared), so a no-match stops being
+retried every sweep. No-data proofs refresh after `no_data_refresh_days`
+(default 7), ordinary proofs after `refresh_days` (default never); the sweep's
+per-table limit bounds the refresh volume. Output runs through `validateRow` first - a value
 failing its type/options/pattern is dropped and reported in `failed`, its
 siblings still land. A write is ONE guarded `db.batch`: provenance, value UPDATE, enforced
 invariants and actual cell history commit together. Reads captured before the

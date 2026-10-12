@@ -157,7 +157,7 @@ PROVENANCE_PROPERTIES = {
         "description": "The column this backs, when it backs one value rather than the row as a whole. Null for imported_from and whole-row evidence.",
     },
     "detail": {
-        "description": "JSON, properties of the PAIR only: cue (the quoted fragment), confidence (high|medium|low), dist_m. Never attributes of the source - follow from_kind + from_ref for those.",
+        "description": "JSON, properties of the PAIR only: cue (the quoted fragment), confidence (high|medium|low), dist_m; no_data (true: a hub derivation's lookup completed without data for the field). Never attributes of the source - follow from_kind + from_ref for those.",
     },
     "asserted_by": {
         "description": "Who made the claim: hub (a derivation), a person's name, script:<name>, agent:<session id>.",

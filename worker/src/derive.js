@@ -5,12 +5,16 @@
 // Protocol: POST <url> {tbl, id, inputs:{col: value}} -> a JSON object whose
 // keys are column names to write, plus an optional `_source_ref`. Keys that
 // are not derived columns of that derivation are ignored; a non-2xx reply or
-// bad JSON leaves the cell underived and is reported in `failed`.
+// bad JSON leaves the cell underived and is reported in `failed`. A 2xx reply
+// is a completed lookup: a derived column it omits gets a no-data proof (the
+// stored value is kept, never cleared), refreshed after `no_data_refresh_days`
+// (default 7). `refresh_days` (default never) refreshes ordinary proofs too.
 //
 // A write is one D1 batch: the value UPDATE plus a provenance upsert per
 // column, so a replica pulling the row also pulls the provenance that proves
 // it and the client's `derived` rule never fires.
 
+import { markChanged } from "./changes.js";
 import { historyPlan } from "./history.js";
 import { checkedReads, commitChecked, enforcedRules, queryBudget } from "./write.js";
 import { canonicalSql, ident, legacySql, literal, proofHashes, propertiesFor, qident, sha256hex, validateRow, storageRow } from "./validate.js";
@@ -101,12 +105,29 @@ const PENDING = "derivation budget reached before this row; retry it";
 const LIMITED = "derivation limit reached before this row; the sweep retries it";
 const UNSCANNED = "derivation sweep budget reached before the end of this table; the next sweep resumes";
 const waiting = (f) => f.error === PENDING || f.error === LIMITED || /deferred by cooldown/.test(f.error);
+// provenance.detail of a lookup that completed without data for its column.
+const NO_DATA = '{"no_data":true}';
+const DAY_MS = 86_400_000;
 
 export function loadDerivations(env) {
   if (!env?.DERIVATIONS) return new Map();
   const obj = JSON.parse(env.DERIVATIONS);
-  return new Map(Object.entries(obj).map(([k, v]) => [k, { url: v.url, headers: v.headers ?? {} }]));
+  return new Map(Object.entries(obj).map(([k, v]) => [k, {
+    url: v.url, headers: v.headers ?? {}, refreshDays: v.refresh_days ?? null, noDataDays: v.no_data_refresh_days ?? 7,
+  }]));
 }
+
+// Per derivation name, the produced_at before which a proof is refreshed
+// (ordinary, no-data); "" never expires.
+function refreshCutoffs(env, byName) {
+  const derivations = loadDerivations(env), now = Date.now();
+  const cutoff = (days) => (days == null ? "" : new Date(now - days * DAY_MS).toISOString());
+  return new Map([...byName.keys()].map((name) => {
+    const { refreshDays = null, noDataDays = 7 } = derivations.get(name) ?? {};
+    return [name, { value: cutoff(refreshDays), noData: cutoff(noDataDays) }];
+  }));
+}
+const expired = (proof, cutoff) => proof.produced_at < (proof.detail === NO_DATA ? cutoff.noData : cutoff.value);
 
 // Derived properties of `table`, grouped by derivation name.
 async function derivationProps(db, table) {
@@ -232,8 +253,9 @@ export async function deriveRows(db, env, table, ids, { fetchImpl = fetch, names
         }
 
         let values = {};
+        const missing = [];
         for (const p of cols) {
-          if (!(p.col in result)) continue;
+          if (!(p.col in result)) { missing.push(p.col); continue; }
           const v = result[p.col];
           values[p.col] = v !== null && typeof v === "object" ? JSON.stringify(v) : v;
         }
@@ -251,50 +273,41 @@ export async function deriveRows(db, env, table, ids, { fetchImpl = fetch, names
         }
 
         const written = Object.entries(values);
-        if (!written.length) continue;
-        const sets = written.map(([c]) => `${qident(c)} = ?`).join(", ");
-        // a derivation is a hub write, so it re-stamps arrival time — otherwise
-        // replicas past this row's hub_at would never pull the derived value.
-        // Guarded on the column existing: a hub table predating hub_at still derives.
-        const stamp = "hub_at" in row ? `, hub_at = (${NOW})` : "";
-        const stmts = [
-          db
-            .prepare(`UPDATE ${qident(t)} SET ${sets}, updated_at = (${NOW})${stamp} WHERE id = ?`)
-            .bind(...written.map(([, v]) => v), id),
-        ];
+        if (!written.length && !missing.length) continue;
         // provenance is a synced table like any other: a hub write stamps hub_at
         // (when the table has it) or replicas past the cursor never pull the proof.
         const hasHubAt = await provenanceHasHubAt(db);
-        const hashes = await proofHashes(db, typeOf, inputs, { ...row, ...values }, written.map(([c]) => c));
+        // A no-data proof hashes the value it leaves in place.
+        const hashes = await proofHashes(db, typeOf, inputs, { ...row, ...values }, [...written.map(([c]) => c), ...missing]);
         const ih = hashes.inputs[0];
-        for (const [c, v] of written) {
-          stmts.push(
-            db
-              .prepare(
-                `INSERT INTO provenance (id, to_kind, to_ref, field, from_kind, from_ref, rel, asserted_by, inputs_hash, value_hash, produced_at, updated_at, deleted_at${hasHubAt ? ", hub_at" : ""})
-                 VALUES (?, ?, ?, ?, ?, ?, 'derived_from', 'hub', ?, ?, (${NOW}), (${NOW}), NULL${hasHubAt ? `, (${NOW})` : ""})
-                 ON CONFLICT(id) DO UPDATE SET from_kind = excluded.from_kind, from_ref = excluded.from_ref,
-                   rel = excluded.rel, asserted_by = excluded.asserted_by, inputs_hash = excluded.inputs_hash,
-                   value_hash = excluded.value_hash, produced_at = excluded.produced_at,
-                   updated_at = excluded.updated_at, deleted_at = NULL${hasHubAt ? `, hub_at = (${NOW})` : ""}`
-              )
-              .bind(
-                `${t}:${id}:${c}`,
-                t,
-                id,
-                c,
-                `http:${name}`,
-                // the endpoint's own ref when it gives one, else the inputs the value came from
-                result._source_ref ?? ih,
-                ih,
-                hashes.values[c][0]
-              )
-          );
+        const stmts = [...written.map(([c]) => [c, null]), ...missing.map((c) => [c, NO_DATA])].map(([c, detail]) => db
+          .prepare(
+            `INSERT INTO provenance (id, to_kind, to_ref, field, from_kind, from_ref, rel, asserted_by, detail, inputs_hash, value_hash, produced_at, updated_at, deleted_at${hasHubAt ? ", hub_at" : ""})
+             VALUES (?, ?, ?, ?, ?, ?, 'derived_from', 'hub', ?, ?, ?, (${NOW}), (${NOW}), NULL${hasHubAt ? `, (${NOW})` : ""})
+             ON CONFLICT(id) DO UPDATE SET from_kind = excluded.from_kind, from_ref = excluded.from_ref,
+               rel = excluded.rel, asserted_by = excluded.asserted_by, detail = excluded.detail, inputs_hash = excluded.inputs_hash,
+               value_hash = excluded.value_hash, produced_at = excluded.produced_at,
+               updated_at = excluded.updated_at, deleted_at = NULL${hasHubAt ? `, hub_at = (${NOW})` : ""}`
+          )
+          // the endpoint's own ref when it gives one, else the inputs the value came from
+          .bind(`${t}:${id}:${c}`, t, id, c, `http:${name}`, result._source_ref ?? ih, detail, ih, hashes.values[c][0]));
+        if (written.length) {
+          // a derivation is a hub write, so it re-stamps arrival time - otherwise
+          // replicas past this row's hub_at would never pull the derived value.
+          // Guarded on the column existing: a hub table predating hub_at still derives.
+          const stamp = "hub_at" in row ? `, hub_at = (${NOW})` : "";
+          stmts.push(db
+            .prepare(`UPDATE ${qident(t)} SET ${written.map(([c]) => `${qident(c)} = ?`).join(", ")}, updated_at = (${NOW})${stamp} WHERE id = ?`)
+            .bind(...written.map(([, v]) => v), id));
+          const rules = await enforcedRules(view, t);
+          const log = await historyPlan(view, db, t, [row]);
+          const { updated_at, hub_at, ...expected } = {...row, ...values};
+          await commitChecked(db, view.reads, t, rules, stmts, new Date().toISOString(), log, [expected], props, [{touched:Object.keys(values)}]);
+        } else {
+          // Proofs only: the guarded reads still pin the row the inputs came from.
+          await commitChecked(db, view.reads, t, [], stmts, new Date().toISOString());
+          markChanged(["provenance"]);
         }
-        const rules = await enforcedRules(view, t);
-        const log = await historyPlan(view, db, t, [row]);
-        const { updated_at, hub_at, ...expected } = {...row, ...values};
-        await commitChecked(db, view.reads, t, rules, [...stmts.slice(1), stmts[0]], new Date().toISOString(), log, [expected], props, [{touched:Object.keys(values)}]);
         out.derived += 1;
       } catch (e) {
         out.failed.push({id, col: cols[0].col, error: String(e)});
@@ -321,7 +334,7 @@ async function provenanceHasHubAt(db) {
 // row's inputs rendered once per distinct input list (columns listing the same
 // inputs share it) in both accepted renderings, and every live proof.
 // Returns [id, names] for each stale row, in id order.
-async function staleWork(db, t, typeOf, byName, ids) {
+async function staleWork(db, t, typeOf, byName, ids, cutoffs) {
   const props = [...byName.values()].flat();
   const lists = [...new Set(props.map((p) => JSON.stringify(p.inputs ?? [])))];
   const array = (render, list) => `json_array(${JSON.parse(list).map((c) => render(`t.${qident(c)}`, typeOf[c])).join(", ") || "NULL"})`;
@@ -330,13 +343,16 @@ async function staleWork(db, t, typeOf, byName, ids) {
     const { results: rows } = await db.prepare(`SELECT t.id, ${lists.map((list, j) => `${array(canonicalSql, list)} AS "c${j}", ${array(legacySql, list)} AS "l${j}"`).join(", ")}
       FROM ${qident(t)} t WHERE t.deleted_at IS NULL AND t.id IN (SELECT value FROM json_each(?)) ORDER BY t.id`)
       .bind(JSON.stringify(ids.slice(i, i + 100))).all();
-    const { results: proofs } = await db.prepare("SELECT id, inputs_hash FROM provenance WHERE deleted_at IS NULL AND id IN (SELECT value FROM json_each(?))")
+    const { results: proofs } = await db.prepare("SELECT id, inputs_hash, produced_at, detail FROM provenance WHERE deleted_at IS NULL AND id IN (SELECT value FROM json_each(?))")
       .bind(JSON.stringify(rows.flatMap((row) => props.map((p) => `${t}:${row.id}:${p.col}`)))).all();
-    const proven = new Map(proofs.map((p) => [p.id, p.inputs_hash]));
+    const proven = new Map(proofs.map((p) => [p.id, p]));
     for (const row of rows) {
       const hashes = await Promise.all(lists.map((_, j) => Promise.all([sha256hex(row[`c${j}`]), sha256hex(row[`l${j}`])])));
-      const fresh = (p) => hashes[lists.indexOf(JSON.stringify(p.inputs ?? []))].includes(proven.get(`${t}:${row.id}:${p.col}`));
-      const names = [...byName].filter(([, cols]) => !cols.every(fresh)).map(([name]) => name);
+      const fresh = (name) => (p) => {
+        const proof = proven.get(`${t}:${row.id}:${p.col}`);
+        return !!proof && hashes[lists.indexOf(JSON.stringify(p.inputs ?? []))].includes(proof.inputs_hash) && !expired(proof, cutoffs.get(name));
+      };
+      const names = [...byName].filter(([name, cols]) => !cols.every(fresh(name))).map(([name]) => name);
       if (names.length) work.push([row.id, names]);
     }
   }
@@ -347,7 +363,7 @@ async function staleWork(db, t, typeOf, byName, ids) {
 // `limit` per derivation; the rest is reported pending, never dropped silently.
 // After a derivation commits, the rows it touched are judged afresh for every
 // derivation reading its outputs: their proofs may have just gone stale.
-async function deriveWork(db, env, t, typeOf, byName, stale, { fetchImpl, limit }) {
+async function deriveWork(db, env, t, typeOf, byName, stale, { fetchImpl, limit, cutoffs }) {
   const out = { derived: 0, failed: [] };
   const { order, deps } = dependencyOrder(byName);
   const work = new Map(stale);
@@ -360,7 +376,7 @@ async function deriveWork(db, env, t, typeOf, byName, stale, { fetchImpl, limit 
     out.derived += r.derived;
     out.failed.push(...r.failed);
     if (order.slice(i + 1).some((later) => deps.get(later).has(name))) {
-      const again = new Map(await staleWork(db, t, typeOf, byName, ids.slice(0, limit)));
+      const again = new Map(await staleWork(db, t, typeOf, byName, ids.slice(0, limit), cutoffs));
       for (const id of ids.slice(0, limit)) work.set(id, again.get(id) ?? []);
     }
   }
@@ -376,8 +392,9 @@ export async function deriveStale(db, env, table, rows, { fetchImpl = fetch, lim
   try {
     const { typeOf, byName } = await derivationProps(db, t);
     if (!byName.size) return { derived: 0, failed: [] };
-    const stale = await staleWork(db, t, typeOf, byName, [...new Set(rows.map((row) => row.id))]);
-    return await deriveWork(db, env, t, typeOf, byName, stale, { fetchImpl, limit });
+    const cutoffs = refreshCutoffs(env, byName);
+    const stale = await staleWork(db, t, typeOf, byName, [...new Set(rows.map((row) => row.id))], cutoffs);
+    return await deriveWork(db, env, t, typeOf, byName, stale, { fetchImpl, limit, cutoffs });
   } catch (e) {
     // Only setup and freshness reads run outside deriveRows: nothing derived yet.
     if (!String(e).includes('life_write_budget')) throw e;
@@ -386,13 +403,14 @@ export async function deriveStale(db, env, table, rows, { fetchImpl = fetch, lim
 }
 
 // One page of candidates in id order after `after`: rows with a derived column
-// lacking a live proof strictly newer than the row. The boundary is inclusive:
-// an edit in the proof's own millisecond is a candidate. A cheap prefilter
-// only; staleWork re-hashes to decide, and the continuation passes rows it
-// found fresh.
-async function candidates(db, t, props, after, limit) {
-  const unproven = props.map((p) => `NOT EXISTS (SELECT 1 FROM provenance p WHERE p.id = ${literal(`${t}:`)} || t.id || ${literal(`:${p.col}`)}
-    AND p.deleted_at IS NULL AND p.produced_at > t.updated_at)`).join(" OR ");
+// lacking an unexpired live proof strictly newer than the row. The boundary is
+// inclusive: an edit in the proof's own millisecond is a candidate. A cheap
+// prefilter only; staleWork re-hashes to decide, and the continuation passes
+// rows it found fresh.
+async function candidates(db, t, byName, cutoffs, after, limit) {
+  const unproven = [...byName].flatMap(([name, cols]) => cols.map((p) => `NOT EXISTS (SELECT 1 FROM provenance p
+    WHERE p.id = ${literal(`${t}:`)} || t.id || ${literal(`:${p.col}`)} AND p.deleted_at IS NULL AND p.produced_at > t.updated_at
+    AND p.produced_at >= CASE WHEN p.detail = ${literal(NO_DATA)} THEN ${literal(cutoffs.get(name).noData)} ELSE ${literal(cutoffs.get(name).value)} END)`)).join(" OR ");
   const { results } = await db.prepare(`SELECT t.id FROM ${qident(t)} t WHERE t.deleted_at IS NULL AND t.id > ? AND (${unproven}) ORDER BY t.id LIMIT ?`)
     .bind(after, limit).all();
   return (results ?? []).map((row) => row.id);
@@ -419,14 +437,14 @@ export async function sweep(db, env, { limit = 50, fetchImpl = fetch, page = 200
     try {
       const t = ident(tbl);
       const { typeOf, byName } = await derivationProps(db, t);
-      const props = [...byName.values()].flat();
+      const cutoffs = refreshCutoffs(env, byName);
       const stopAt = db.remaining() - Math.max(0, db.remaining() - floor) / (tables.length - i);
       const start = cursors.get(t) ?? "", seen = [start], stale = [];
       let after = start, end = false;
       while (stale.length < limit && db.remaining() - 3 >= stopAt) {
-        const ids = await candidates(db, t, props, after, page);
+        const ids = await candidates(db, t, byName, cutoffs, after, page);
         end = ids.length < page;
-        const names = new Map(await staleWork(db, t, typeOf, byName, ids));
+        const names = new Map(await staleWork(db, t, typeOf, byName, ids, cutoffs));
         for (const id of ids) {
           seen.push(id);
           after = id;
@@ -436,7 +454,7 @@ export async function sweep(db, env, { limit = 50, fetchImpl = fetch, page = 200
         if (end) break;
       }
       if (!end && stale.length < limit) out.failed.push({ table: t, id: null, col: null, error: UNSCANNED });
-      const r = await deriveWork(db, env, t, typeOf, byName, stale, { fetchImpl, limit });
+      const r = await deriveWork(db, env, t, typeOf, byName, stale, { fetchImpl, limit, cutoffs });
       out.derived += r.derived;
       out.failed.push(...r.failed);
       // Resume at the first row left unattempted, else past every row handled.

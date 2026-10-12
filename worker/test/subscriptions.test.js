@@ -184,7 +184,7 @@ test('capacity and oversize events reject the mutation without sequence gaps',as
 test('accepted derivations record values and the exact committed source revision',async()=>{
   const {deriveRows}=await import('../src/derive.js');
   const db=database();
-  db.db.exec(`CREATE TABLE provenance(id TEXT PRIMARY KEY,to_kind TEXT,to_ref TEXT,field TEXT,from_kind TEXT,from_ref TEXT,rel TEXT,asserted_by TEXT,inputs_hash TEXT,value_hash TEXT,produced_at TEXT,updated_at TEXT,deleted_at TEXT,hub_at TEXT);
+  db.db.exec(`CREATE TABLE provenance(id TEXT PRIMARY KEY,to_kind TEXT,to_ref TEXT,field TEXT,from_kind TEXT,from_ref TEXT,rel TEXT,detail TEXT,asserted_by TEXT,inputs_hash TEXT,value_hash TEXT,produced_at TEXT,updated_at TEXT,deleted_at TEXT,hub_at TEXT);
     INSERT INTO catalog_properties(id,tbl,col,type) VALUES ('articles.id','articles','id','text');
     UPDATE catalog_properties SET derived_by='http:fixture',inputs='["id"]' WHERE id='articles.url';
     INSERT INTO articles(id,updated_at) VALUES ('a','2026-10-03T00:00:00.000Z');`);
