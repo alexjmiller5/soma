@@ -693,18 +693,21 @@ test('chunks shrink after one overruns its time target and grow back when quick'
   const { db } = await local();
   for (let i = 0; i < 600; i++) await db.run('INSERT INTO items(id,name) VALUES (?,?)', [`r${String(i).padStart(3, '0')}`, 'Row']);
   await core.searchIndexStep(db, { budgetMs: 0 }); // reconcile
-  const run = db.run.bind(db);
-  let slow = true;
-  // A host whose chunks are slow (no JIT, wide rows): 60 ms for every chunk's index write.
-  db.run = async (sql, params) => { if (slow && sql.startsWith('INSERT INTO _core_search_fts')) await Bun.sleep(60); return run(sql, params); };
-  const indexed = async () => { await core.searchIndexStep(db, { budgetMs: 0 }); return docs(db, 'items'); };
-  expect(await indexed()).toBe(200);
-  expect(await indexed()).toBe(300);
-  expect(await indexed()).toBe(350);
-  slow = false;
-  expect(await indexed()).toBe(375);
-  expect(await indexed()).toBe(425);
-  db.run = run;
+  const run = db.run.bind(db), clock = Date.now;
+  let slow = true, now = clock();
+  // A host whose chunks are slow (no JIT, wide rows): 60 ms for every chunk's index write, then 1 ms.
+  // The clock only moves there, so a loaded test machine cannot change the outcome.
+  Date.now = () => now;
+  db.run = async (sql, params) => { if (sql.startsWith('INSERT INTO _core_search_fts')) now += slow ? 60 : 1; return run(sql, params); };
+  try {
+    const indexed = async () => { await core.searchIndexStep(db, { budgetMs: 0 }); return docs(db, 'items'); };
+    expect(await indexed()).toBe(200);
+    expect(await indexed()).toBe(300);
+    expect(await indexed()).toBe(350);
+    slow = false;
+    expect(await indexed()).toBe(375);
+    expect(await indexed()).toBe(425);
+  } finally { Date.now = clock; db.run = run; }
 });
 
 test('index labels follow the display rules: trimmed display text, else the id', async () => {
@@ -760,4 +763,57 @@ test('a walk installs its queue triggers as it starts and leaves the index recon
   // An edit to a row the walk already passed is queued by the trigger.
   await db.run("UPDATE items SET name='after walk' WHERE id='a'");
   expect((await search(db, { text: 'walk', limit: 10 })).map(h => h.id).sort()).toEqual(['a', 'r400']);
+});
+
+test('index-only schema changes keep the search index, catalog revision and writeability', async () => {
+  const { db } = await local();
+  await core.initCore(db);
+  for (let i = 0; i < 450; i++) await db.run('INSERT INTO items(id,name) VALUES (?,?)', [`r${String(i).padStart(3, '0')}`, 'Row']);
+  await drain(db);
+  const revision = (await core.catalogRevision(db)).revision;
+  const writeable = await core.writeability(db, { table: 'items' });
+  const entries = async () => await db.all("SELECT docid,row_id FROM _core_search_docs WHERE tbl='items' ORDER BY docid");
+  const indexed = await entries();
+  // A user index (logged DDL a replica replays), a unique one and their removal: none touches indexed text.
+  const statements: string[] = [];
+  const all = db.all.bind(db);
+  db.all = async (sql, params) => { statements.push(sql); return all(sql, params); };
+  for (const ddl of ['CREATE INDEX items_qty ON items(qty, name) WHERE deleted_at IS NULL', 'CREATE UNIQUE INDEX items_name ON items(name, id)', 'DROP INDEX items_qty']) {
+    await db.run(ddl);
+    expect(await core.searchIndexStep(db, { budgetMs: 0 })).toEqual({ indexing: false, pending: 0, done: true });
+    expect(await db.all('SELECT * FROM _core_search_work')).toEqual([]);
+  }
+  db.all = all;
+  expect(statements.some(sql => sql.includes('p.name,p.pk'))).toBe(false); // not even reconciled
+  expect((await core.catalogRevision(db)).revision).toBe(revision);
+  expect(await core.writeability(db, { table: 'items' })).toEqual(writeable);
+  // A later reconciliation (another table joins the catalog) still leaves this table's entries alone.
+  await table(db, 'other', 3);
+  expect(await core.searchIndexStep(db, { budgetMs: 0 })).toMatchObject({ indexing: true, done: false });
+  expect(await db.all('SELECT tbl FROM _core_search_work')).toEqual([{ tbl: 'other' }]);
+  await drain(db);
+  expect(await entries()).toEqual(indexed);
+  // Edits still reach the index.
+  await db.run("UPDATE items SET name='indexed later' WHERE id='r001'");
+  expect(await ids(db, 'later')).toEqual(['r001']);
+  // A REPLACE victim of a unique index added after indexing still leaves the index.
+  await db.run('CREATE UNIQUE INDEX items_qty_once ON items(qty)');
+  await db.run("INSERT OR REPLACE INTO items(id,name,qty) VALUES ('victor','indexed later',42)");
+  expect((await ids(db, 'later')).sort()).toEqual(['r001', 'victor']);
+  expect(await ids(db, 'offline')).toEqual([]);
+});
+
+test('fingerprints written before indexes were ignored keep a table indexed after an upgrade', async () => {
+  const { db } = await local();
+  await drain(db);
+  // The earlier format listed the table's index definitions; with them unchanged the table stays indexed.
+  const [table] = await db.all("SELECT sql FROM sqlite_master WHERE type='table' AND name='items'");
+  const indexes = (await db.all("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='items'")).map(r => String(r.sql)).sort();
+  await db.run("UPDATE _core_search_state SET fingerprint=? WHERE tbl='items'", [JSON.stringify([2, table.sql, indexes, ['body', 'name'], 'name', ['body']])]);
+  await db.run("UPDATE _core_search_state SET fingerprint='earlier format' WHERE tbl=''");
+  expect(await core.searchIndexStep(db, { budgetMs: 0 })).toEqual({ indexing: false, pending: 0, done: true });
+  expect(await db.all('SELECT * FROM _core_search_work')).toEqual([]);
+  // A definition that did change (a new text column) still re-indexes the table.
+  await db.run("UPDATE catalog_properties SET type='text' WHERE col='qty'");
+  expect(await ids(db, '42')).toEqual(['a']);
 });

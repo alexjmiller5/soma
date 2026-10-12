@@ -59,7 +59,8 @@ export async function prepareReadPlan(db: SqlDriver, value: PrepareReadPlanArgs)
       const expectedRows=await db.all(sql,parameters);
       guards.push({kind,sql,parameters,expectedRows});
     };
-    await guard('schema',"SELECT type,name,tbl_name,sql FROM main.sqlite_master WHERE substr(name,1,7) != 'sqlite_' ORDER BY type COLLATE BINARY,name COLLATE BINARY");
+    // Indexes never change what a plan reads, so adding or dropping one keeps it current.
+    await guard('schema',"SELECT type,name,tbl_name,sql FROM main.sqlite_master WHERE type<>'index' AND substr(name,1,7) != 'sqlite_' ORDER BY type COLLATE BINARY,name COLLATE BINARY");
     await guard('catalog','SELECT * FROM main.catalog_tables WHERE id=? COLLATE BINARY',[args.table]);
     await guard('catalog','SELECT * FROM main.catalog_properties WHERE tbl=? COLLATE BINARY ORDER BY id COLLATE BINARY',[args.table]);
     if (args.viewID!==undefined) await guard('view','SELECT id,tbl,definition,updated_at,deleted_at FROM main.views WHERE id=? COLLATE BINARY',[args.viewID]);

@@ -108,11 +108,14 @@ function describeTable(entry: Row, properties: Catalog['properties'], schema: Sc
   if (!text.length) return null;
   const markdown = properties.filter(p => p.type === 'markdown' && names.has(p.col)).map(p => p.col).sort();
   const display = typeof entry.display === 'string' && names.has(entry.display) ? entry.display : undefined;
-  const indexes = [...schema.indexes.get(table) ?? []].sort();
-  const fingerprint = JSON.stringify([2, physical.sql, indexes, text, display, markdown]);
+  const indexes = schema.indexes.get(table) ?? [];
+  // Indexes never change what a row's entry holds, so a query index (logged DDL every
+  // replica replays) re-indexes nothing.
+  const fingerprint = JSON.stringify([3, physical.sql, text, display, markdown]);
   // REPLACE can silently delete a victim of another UNIQUE constraint when
   // recursive_triggers is off. Only dirty tables with such constraints need
   // an indexed ID anti-join sweep; clean searches never scan source contents.
+  // Read from the current schema each step, so a unique index added later counts too.
   const sweep = /unique|collate/i.test([physical.sql, ...indexes].join(' '));
   return { table, columns: text, markdown, display, fingerprint, sweep, rowid: !/WITHOUT\s+ROWID\s*$/i.test(String(physical.sql).trim()) };
 }
@@ -163,14 +166,15 @@ async function sizeTables(db: SqlDriver, tables: IndexedTable[], { counts, chose
 
 /** The _core_state row recording the schema, catalog and settings of the last reconciliation. */
 const READY = '';
-/** The catalog revision, the size-rule inputs and every table, index and trigger definition, built and
- * compared inside SQLite: host bridges need not return row objects with a stable key order. */
+/** The catalog revision, the size-rule inputs and every table and trigger definition, built and
+ * compared inside SQLite: host bridges need not return row objects with a stable key order.
+ * Indexes are left out: adding or dropping one changes nothing the index holds. */
 async function searchStampSQL(db: SqlDriver): Promise<string> {
   const settings = await stateTable(db)
     ? `(SELECT ifnull(group_concat(key||'='||value,char(30)),'') FROM (SELECT key,value FROM main._core_state WHERE key IN ('hub_stats','${SEARCH_TABLES_KEY}') ORDER BY key))`
     : "''";
   return `${await catalogRevisionSQL(db)}||'|'||${settings}||'|'||(SELECT ifnull(group_concat(m,char(30)),'') FROM (SELECT type||char(31)||name||char(31)||tbl_name||char(31)||ifnull(sql,'') AS m
-    FROM main.sqlite_master WHERE type IN ('table','index','trigger') ORDER BY type,name))`;
+    FROM main.sqlite_master WHERE type IN ('table','trigger') ORDER BY type,name))`;
 }
 /** Neither schema, catalog nor settings moved since the last reconciliation: the
  * tracked tables, their triggers and their fingerprints are all still right. */
@@ -198,8 +202,17 @@ async function searchCatalog(db: SqlDriver): Promise<Catalog> {
   };
 }
 
-async function reconcile(db: SqlDriver): Promise<void> {
-  await initSearch(db);
+/** A stored fingerprint in the current format. Version 2 also listed the table's index
+ * definitions; without them it describes the same rows, so an upgrade re-indexes nothing. */
+function definitionOf(fingerprint: unknown): unknown {
+  try {
+    const parsed = JSON.parse(String(fingerprint));
+    return Array.isArray(parsed) && parsed[0] === 2 && parsed.length === 6 ? JSON.stringify([3, parsed[1], ...parsed.slice(3)]) : fingerprint;
+  } catch { return fingerprint; }
+}
+
+/** Every table the index could hold, described from the catalog and schema in a few statements. */
+async function candidateTables(db: SqlDriver) {
   const catalog = await searchCatalog(db);
   const rows = await db.all("SELECT type,name,tbl_name,sql FROM main.sqlite_master WHERE type IN ('table','index','trigger')");
   const schema = indexSchema(rows);
@@ -213,7 +226,12 @@ async function reconcile(db: SqlDriver): Promise<void> {
     WHERE m.type='table' AND m.name IN (SELECT value FROM json_each(?))`, [JSON.stringify(catalog.tables.map(t => t.id))])) {
     columns.set(String(row.tbl), [...columns.get(String(row.tbl)) ?? [], row]);
   }
-  const candidates = catalog.tables.flatMap(entry => describeTable(entry, properties.get(String(entry.id)) ?? [], schema, columns.get(String(entry.id)) ?? []) ?? []);
+  return { rows, schema, candidates: catalog.tables.flatMap(entry => describeTable(entry, properties.get(String(entry.id)) ?? [], schema, columns.get(String(entry.id)) ?? []) ?? []) };
+}
+
+async function reconcile(db: SqlDriver): Promise<void> {
+  await initSearch(db);
+  const { rows, schema, candidates } = await candidateTables(db);
   const sizes = await sizeTables(db, candidates, await searchSettings(db));
   const tables = candidates.filter(t => sizes.has(t.table));
   const expected = new Map(tables.flatMap(t => searchTriggers(t.table).map(trigger => [trigger.name, trigger.sql] as const)));
@@ -233,7 +251,7 @@ async function reconcile(db: SqlDriver): Promise<void> {
     await db.run('DELETE FROM _core_search_state WHERE tbl=?', [retired]);
     await db.run('INSERT INTO _core_search_work(tbl,purge,backfill) VALUES (?,1,NULL) ON CONFLICT(tbl) DO UPDATE SET purge=1,backfill=NULL', [retired]);
   }
-  const fingerprints = new Map(states.map(s => [String(s.tbl), s.fingerprint]));
+  const fingerprints = new Map(states.map(s => [String(s.tbl), definitionOf(s.fingerprint)]));
   const changed = tables.filter(t => !(fingerprints.get(t.table) === t.fingerprint
     && searchTriggers(t.table).every(trigger => schema.triggers.get(trigger.name) === trigger.sql)));
   // The backfill walks the rows already there, after purging any entries an earlier

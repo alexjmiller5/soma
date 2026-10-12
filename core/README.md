@@ -234,9 +234,10 @@ Only `searchIndexStep({budgetMs})` builds the index. Hosts call it after each
 sync round, after local writes and while idle, until it returns `done`; each
 call is one BEGIN IMMEDIATE transaction that works in chunks until the budget
 (default 50 ms, at least one chunk) passes, so requests between calls never
-wait long. It reconciles first when the catalog, schema or settings moved
-(a stamp built and compared in SQLite, so no host's row-object key order
-matters): in a few statements for the whole catalog (each crosses a host
+wait long. It reconciles first when the catalog, table or trigger schema or
+settings moved (a stamp built and compared in SQLite, so no host's row-object key
+order matters; indexes are left out, so a query index - logged DDL every replica
+replays - re-indexes nothing): in a few statements for the whole catalog (each crosses a host
 bridge) plus any triggers it drops, it records per-table work in
 `_core_search_work` without touching rows. Then it purges entries of retired or
 changed tables (500 per chunk), indexes queued IDs, and backfills newly indexed
@@ -263,6 +264,13 @@ index. The `_core_state` key `search_tables` (`SEARCH_TABLES_KEY`)
 holds a JSON object of table to `true` (index it anyway) or `false` (leave it
 out); an unreadable value counts as absent. Sizes are judged when
 reconciliation runs, which hub count refreshes and setting edits trigger.
+
+Index-only schema changes keep every local proof: the search stamp and table
+fingerprints ignore indexes (version 2 fingerprints, which listed them, still
+match), `catalogRevision` and `writeability` never read them, published read
+plans' schema guard leaves them out, and replaying a logged `CREATE INDEX` keeps
+the table's incremental pull (sync compares only table definitions) while the
+round renews coverage like any schema change.
 
 Each chunk is a keyset range of the queue or table and looks up index entries
 by identity (`CROSS JOIN` keeps the batch outermost; a plain join lets SQLite

@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { sync } from '../src/sync.ts';
 import { syncStatus } from '../src/status.ts';
+import { coverageProblem } from '../src/coverage.ts';
 import { setup, schema, T0, T1, T2 } from './support.ts';
 
 // A replica must make durable progress even when a round cannot finish in one
@@ -33,6 +34,18 @@ test('a schema change in another table keeps incremental pulls; only the changed
   expect(pulls(requests, 'items').map(b => b.since)).toEqual(['']);
   expect(pulls(requests, 'history').map(b => b.since)).toEqual([]);
   expect(await db.all("SELECT color FROM items WHERE id='a'")).toEqual([{ color: 'red' }]);
+});
+
+test('a replayed index keeps its table\'s incremental pull and renews coverage in the same round', async () => {
+  const { db, remote, hub, requests } = setup();
+  remote.db.query('INSERT INTO items(id,name,updated_at,hub_at) VALUES (?,?,?,?)').run('a', 'A', T0, T1);
+  await sync(db, hub);
+  hubDDL(remote, 'CREATE INDEX items_name ON items(name) WHERE deleted_at IS NULL');
+  requests.length = 0;
+  await sync(db, hub);
+  expect(await db.all("SELECT name FROM sqlite_master WHERE type='index' AND name='items_name'")).toEqual([{ name: 'items_name' }]);
+  expect(pulls(requests, 'items').map(b => b.since)).toEqual([]);
+  expect(await coverageProblem(db)).toBeNull();
 });
 
 test('a replayed drop and recreate with identical physical SQL re-pulls that table in full', async () => {

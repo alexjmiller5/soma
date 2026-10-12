@@ -90,6 +90,15 @@ test.each(['schema','catalog','view'] as const)('guards reject %s drift before r
   await expect(execute(db,plan,context('2026-10-07'))).rejects.toThrow();
 });
 
+test('an index added or dropped after preparation keeps a published plan current',async()=>{
+  const db=await fixture(),input=await saved(db,[]),plan=await core.prepareReadPlan(db,input);
+  await db.run("INSERT INTO items(id,name,status,updated_at) VALUES ('a','A','first',?)",[T0]);
+  await db.run('CREATE INDEX items_status ON items(status, due) WHERE deleted_at IS NULL');
+  expect(await execute(db,plan,context('2026-10-07'))).toEqual([{id:'a',name:'A'}]);
+  await db.run('DROP INDEX items_status');
+  expect(await execute(db,plan,context('2026-10-07'))).toEqual([{id:'a',name:'A'}]);
+});
+
 test('workspace/replica identity and calendar policy are explicit, selected view revision is checked',async()=>{
   const db=await fixture(),input=await saved(db,[]),plan=await core.prepareReadPlan(db,input);
   expect(plan.calendarPolicy).toEqual({timeZone:'UTC',dayStartMinutes:180});
