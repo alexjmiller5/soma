@@ -122,6 +122,21 @@ async function derivationProps(db, table) {
   return { typeOf, byName };
 }
 
+// Derivation names in dependency order: one whose inputs include another's
+// outputs runs after it, so a summary never reads a value its producer is about
+// to replace. Members of a cycle keep catalog order.
+function dependencyOrder(byName) {
+  const producer = new Map([...byName].flatMap(([name, cols]) => cols.map((p) => [p.col, name])));
+  const deps = new Map([...byName].map(([name, cols]) =>
+    [name, new Set(cols.flatMap((p) => p.inputs ?? []).map((c) => producer.get(c)).filter((d) => d && d !== name))]));
+  const order = [];
+  while (order.length < byName.size) {
+    const left = [...byName.keys()].filter((n) => !order.includes(n));
+    order.push(left.find((n) => [...deps.get(n)].every((d) => order.includes(d))) ?? left[0]);
+  }
+  return { order, deps };
+}
+
 export async function deriveRows(db, env, table, ids, { fetchImpl = fetch, names = null, col = null, expectedUpdatedAt } = {}) {
   db = queryBudget(db, 900);
   const t = ident(table);
@@ -140,8 +155,10 @@ export async function deriveRows(db, env, table, ids, { fetchImpl = fetch, names
   // Statements a derivation may still need, from the costliest one so far: a
   // row starts only while its commit fits in what is left of the budget.
   let reserve = 0;
+  const { order } = dependencyOrder(byName);
   for (const id of ids) {
-    for (const [name, cols] of byName) {
+    for (const name of order) {
+      const cols = byName.get(name);
       if (names && !names.has(name)) continue;
       // `col` narrows to the derivation that produces it; its siblings come
       // back in the same response, so they are written too rather than wasted.
@@ -326,17 +343,26 @@ async function staleWork(db, t, typeOf, byName, ids) {
   return work;
 }
 
-// Derive stale rows ([id, names] from staleWork), at most `limit` per
-// derivation; the rest is reported pending, never dropped silently.
-async function deriveWork(db, env, t, byName, stale, { fetchImpl, limit }) {
+// Derive stale rows ([id, names] from staleWork) in dependency order, at most
+// `limit` per derivation; the rest is reported pending, never dropped silently.
+// After a derivation commits, the rows it touched are judged afresh for every
+// derivation reading its outputs: their proofs may have just gone stale.
+async function deriveWork(db, env, t, typeOf, byName, stale, { fetchImpl, limit }) {
   const out = { derived: 0, failed: [] };
-  for (const [name, cols] of byName) {
-    const ids = stale.filter(([, names]) => names.includes(name)).map(([id]) => id);
+  const { order, deps } = dependencyOrder(byName);
+  const work = new Map(stale);
+  for (const [i, name] of order.entries()) {
+    const cols = byName.get(name);
+    const ids = [...work].filter(([, names]) => names.includes(name)).map(([id]) => id);
     for (const id of ids.slice(limit)) out.failed.push({ id, col: cols[0].col, error: LIMITED });
     if (!ids.length) continue;
     const r = await deriveRows(db, env, t, ids.slice(0, limit), { fetchImpl, names: new Set([name]) });
     out.derived += r.derived;
     out.failed.push(...r.failed);
+    if (order.slice(i + 1).some((later) => deps.get(later).has(name))) {
+      const again = new Map(await staleWork(db, t, typeOf, byName, ids.slice(0, limit)));
+      for (const id of ids.slice(0, limit)) work.set(id, again.get(id) ?? []);
+    }
   }
   return out;
 }
@@ -351,7 +377,7 @@ export async function deriveStale(db, env, table, rows, { fetchImpl = fetch, lim
     const { typeOf, byName } = await derivationProps(db, t);
     if (!byName.size) return { derived: 0, failed: [] };
     const stale = await staleWork(db, t, typeOf, byName, [...new Set(rows.map((row) => row.id))]);
-    return await deriveWork(db, env, t, byName, stale, { fetchImpl, limit });
+    return await deriveWork(db, env, t, typeOf, byName, stale, { fetchImpl, limit });
   } catch (e) {
     // Only setup and freshness reads run outside deriveRows: nothing derived yet.
     if (!String(e).includes('life_write_budget')) throw e;
@@ -360,11 +386,13 @@ export async function deriveStale(db, env, table, rows, { fetchImpl = fetch, lim
 }
 
 // One page of candidates in id order after `after`: rows with a derived column
-// lacking a live proof newer than the row. A cheap prefilter only; staleWork
-// re-hashes to decide, and the continuation passes rows it found fresh.
+// lacking a live proof strictly newer than the row. The boundary is inclusive:
+// an edit in the proof's own millisecond is a candidate. A cheap prefilter
+// only; staleWork re-hashes to decide, and the continuation passes rows it
+// found fresh.
 async function candidates(db, t, props, after, limit) {
   const unproven = props.map((p) => `NOT EXISTS (SELECT 1 FROM provenance p WHERE p.id = ${literal(`${t}:`)} || t.id || ${literal(`:${p.col}`)}
-    AND p.deleted_at IS NULL AND p.produced_at >= t.updated_at)`).join(" OR ");
+    AND p.deleted_at IS NULL AND p.produced_at > t.updated_at)`).join(" OR ");
   const { results } = await db.prepare(`SELECT t.id FROM ${qident(t)} t WHERE t.deleted_at IS NULL AND t.id > ? AND (${unproven}) ORDER BY t.id LIMIT ?`)
     .bind(after, limit).all();
   return (results ?? []).map((row) => row.id);
@@ -408,7 +436,7 @@ export async function sweep(db, env, { limit = 50, fetchImpl = fetch, page = 200
         if (end) break;
       }
       if (!end && stale.length < limit) out.failed.push({ table: t, id: null, col: null, error: UNSCANNED });
-      const r = await deriveWork(db, env, t, byName, stale, { fetchImpl, limit });
+      const r = await deriveWork(db, env, t, typeOf, byName, stale, { fetchImpl, limit });
       out.derived += r.derived;
       out.failed.push(...r.failed);
       // Resume at the first row left unattempted, else past every row handled.

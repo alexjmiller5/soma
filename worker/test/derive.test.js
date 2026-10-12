@@ -882,3 +882,54 @@ test("a sweep whose scan share runs out says so and the next one resumes after i
   expect(s.calls).toEqual(["t59"]);
   expect(second).toEqual({ derived: 1, failed: [] });
 });
+
+// A summary listed before its producer: first_year reads the year deezer derives.
+async function songs() {
+  const db = new D1Shim();
+  db.db.exec(`CREATE TABLE catalog_properties (id TEXT PRIMARY KEY, tbl TEXT, col TEXT, label TEXT, sort INTEGER, type TEXT, required INTEGER, default_value TEXT, options TEXT, options_sql TEXT, min_items INTEGER, max_items INTEGER, pattern TEXT, ref_table TEXT, derived_by TEXT, inputs TEXT, immutable INTEGER, deprecated INTEGER, description TEXT, source TEXT, source_ref TEXT, created_at TEXT, updated_at TEXT, deleted_at TEXT)`);
+  db.db.exec(`CREATE TABLE provenance (id TEXT PRIMARY KEY, from_kind TEXT, from_ref TEXT, to_kind TEXT, to_ref TEXT, rel TEXT, field TEXT, detail TEXT, asserted_by TEXT, inputs_hash TEXT, value_hash TEXT, produced_at TEXT, created_at TEXT, updated_at TEXT, deleted_at TEXT, hub_at TEXT)`);
+  db.db.exec("CREATE TABLE songs (id TEXT PRIMARY KEY, isrc TEXT, first_year INTEGER, year INTEGER, created_at TEXT, updated_at TEXT, deleted_at TEXT, hub_at TEXT)");
+  db.db.exec(`INSERT INTO catalog_properties (id, tbl, col, sort, type) VALUES ('songs.isrc','songs','isrc',0,'text')`);
+  db.db.exec(`INSERT INTO catalog_properties (id, tbl, col, sort, type, derived_by, inputs) VALUES ('songs.first_year','songs','first_year',1,'int','http:first_year','["year"]')`);
+  db.db.exec(`INSERT INTO catalog_properties (id, tbl, col, sort, type, derived_by, inputs) VALUES ('songs.year','songs','year',2,'int','http:deezer','["isrc"]')`);
+  db.db.exec("INSERT INTO songs (id, isrc, updated_at) VALUES ('s1', 'ISRC1', '2026-01-01T00:00:00.000Z')");
+  const env = { DERIVATIONS: JSON.stringify({ deezer: { url: "https://derivations.example/deezer" }, first_year: { url: "https://derivations.example/first_year" } }) };
+  const source = { year: 1999 };
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push([url.split("/").at(-1), body.inputs]);
+    return Response.json(url.endsWith("/deezer") ? { year: source.year } : { first_year: body.inputs.year });
+  };
+  return { db, env, source, calls, fetchImpl };
+}
+
+test("a derivation reading another's output runs after it, whatever the catalog order", async () => {
+  const { db, env, calls, fetchImpl } = await songs();
+  expect(await deriveRows(db, env, "songs", ["s1"], { fetchImpl })).toEqual({ derived: 2, failed: [] });
+  expect(calls).toEqual([["deezer", { isrc: "ISRC1" }], ["first_year", { year: 1999 }]]);
+  expect(db.db.query("SELECT first_year FROM songs").get().first_year).toBe(1999);
+});
+
+test("a summary is re-evaluated after its producer commits in the same pass", async () => {
+  const { db, env, source, calls, fetchImpl } = await songs();
+  await deriveRows(db, env, "songs", ["s1"], { fetchImpl });
+  db.db.exec("UPDATE songs SET isrc = 'ISRC2', updated_at = '2030-01-01T00:00:00.000Z'");
+  source.year = 2001;
+  calls.length = 0;
+  expect(await sweep(db, env, { fetchImpl })).toEqual({ derived: 2, failed: [] });
+  expect(calls.map(([name]) => name)).toEqual(["deezer", "first_year"]);
+  expect(db.db.query("SELECT first_year FROM songs").get().first_year).toBe(2001);
+});
+
+test("an input change in the same millisecond as the proof still re-derives", async () => {
+  const { db, env, source, calls, fetchImpl } = await songs();
+  await deriveRows(db, env, "songs", ["s1"], { fetchImpl });
+  db.db.exec("UPDATE provenance SET produced_at = '2030-01-01T00:00:00.000Z'");
+  db.db.exec("UPDATE songs SET isrc = 'ISRC2', updated_at = '2030-01-01T00:00:00.000Z'");
+  source.year = 2001;
+  calls.length = 0;
+  await sweep(db, env, { fetchImpl });
+  expect(calls.map(([name]) => name)).toContain("deezer");
+  expect(db.db.query("SELECT year FROM songs").get().year).toBe(2001);
+});

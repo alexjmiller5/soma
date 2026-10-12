@@ -932,7 +932,11 @@ selects ids locally, calls `/v1/derive` in chunks of 50, and reports totals -
 it never computes a derived value itself. Requires a hub token with
 `tables:write` (or `full`/admin).
 
-The sweep pages candidates in id order and re-hashes them, passing rows found
+Derivations run in dependency order (one whose inputs include another's outputs
+runs after it; a cycle keeps catalog order), and after a commit the touched rows
+are judged afresh for the derivations reading its outputs. A candidate is a row
+whose `updated_at` is at or past a proof's `produced_at` (inclusive: same-millisecond
+edits count); hashes decide freshness. The sweep pages candidates in id order and re-hashes them, passing rows found
 fresh; each table resumes after the id stored in `_derivation_cursors` (hub-owned
 operational state like the cooldowns), held back at the first row left
 unattempted (budget, limit, cooldown), so no row hides the rows after it. Scans
