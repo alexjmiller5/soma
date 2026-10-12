@@ -296,6 +296,7 @@ export function queryBudget(db, maximum) {
       return db.prepare(sql);
     },
     batch: statements => db.batch(statements),
+    remaining: () => maximum - queries,
   };
   budgeted.add(wrapper);
   return wrapper;

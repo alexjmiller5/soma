@@ -13,7 +13,7 @@
 
 import { historyPlan } from "./history.js";
 import { checkedReads, commitChecked, enforcedRules, queryBudget } from "./write.js";
-import { ident, proofHashes, propertiesFor, qident, sha256hex, validateRow, storageRow } from "./validate.js";
+import { canonicalSql, ident, legacySql, proofHashes, propertiesFor, qident, sha256hex, validateRow, storageRow } from "./validate.js";
 
 // A hung endpoint would otherwise stall the whole sequential sweep.
 const ENDPOINT_TIMEOUT_MS = 60_000;
@@ -93,6 +93,10 @@ function transportError(name, error, signal) {
 
 const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 
+// Reported for a row left for the next call or sweep: never fetched, so a
+// budget that cannot also cover the commit never wastes an external call.
+const PENDING = "derivation budget reached before this row; retry it";
+
 export function loadDerivations(env) {
   if (!env?.DERIVATIONS) return new Map();
   const obj = JSON.parse(env.DERIVATIONS);
@@ -127,6 +131,10 @@ export async function deriveRows(db, env, table, ids, { fetchImpl = fetch, names
   }
   catch (e) { return {derived:0,failed:ids.map(id=>({id,col,error:String(e)}))}; }
 
+  let schema = null;
+  // Statements a derivation may still need, from the costliest one so far: a
+  // row starts only while its commit fits in what is left of the budget.
+  let reserve = 0;
   for (const id of ids) {
     for (const [name, cols] of byName) {
       if (names && !names.has(name)) continue;
@@ -134,6 +142,11 @@ export async function deriveRows(db, env, table, ids, { fetchImpl = fetch, names
       // back in the same response, so they are written too rather than wasted.
       if (col && !cols.some((p) => p.col === col)) continue;
 
+      const start = db.remaining();
+      if (start < (reserve || 60 + 2 * cols.length)) {
+        out.failed.push({ id, col: cols[0].col, error: PENDING });
+        continue;
+      }
       try {
         // Re-read per derivation: one derivation's output can be another's
         // input, and hashing a stale row would leave provenance that never
@@ -202,7 +215,7 @@ export async function deriveRows(db, env, table, ids, { fetchImpl = fetch, names
           const v = result[p.col];
           values[p.col] = v !== null && typeof v === "object" ? JSON.stringify(v) : v;
         }
-        const schema = (await db.prepare(`PRAGMA table_info(${qident(t)})`).all()).results;
+        schema ??= (await db.prepare(`PRAGMA table_info(${qident(t)})`).all()).results;
         values = storageRow(schema, values);
         const props = await propertiesFor(view,t);
         // A misbehaving endpoint must not corrupt a locked column: check the
@@ -263,6 +276,8 @@ export async function deriveRows(db, env, table, ids, { fetchImpl = fetch, names
         out.derived += 1;
       } catch (e) {
         out.failed.push({id, col: cols[0].col, error: String(e)});
+      } finally {
+        reserve = Math.max(reserve, Math.ceil((start - db.remaining()) * 1.25));
       }
     }
   }
@@ -280,19 +295,28 @@ async function provenanceHasHubAt(db) {
 
 // Which (row, derivation) pairs are underived or stale: no live provenance, or
 // provenance whose inputs_hash no longer matches the row's current inputs.
-async function staleWork(db, table, typeOf, byName, rows) {
+// Judged on the stored rows in two reads per chunk, never one per cell: each
+// row's inputs rendered once per distinct input list (columns listing the same
+// inputs share it) in both accepted renderings, and every live proof.
+async function staleWork(db, t, typeOf, byName, ids) {
+  const props = [...byName.values()].flat();
+  const lists = [...new Set(props.map((p) => JSON.stringify(p.inputs ?? [])))];
+  const array = (render, list) => `json_array(${JSON.parse(list).map((c) => render(`t.${qident(c)}`, typeOf[c])).join(", ") || "NULL"})`;
   const work = new Map();
-  for (const row of rows) {
-    for (const [name, cols] of byName) {
-      for (const p of cols) {
-        const prov = await db
-          .prepare("SELECT inputs_hash FROM provenance WHERE id = ? AND deleted_at IS NULL")
-          .bind(`${table}:${row.id}:${p.col}`)
-          .first();
-        if (prov && (await proofHashes(db, typeOf, p.inputs ?? [], row)).inputs.includes(prov.inputs_hash)) continue;
-        if (!work.has(name)) work.set(name, new Set());
-        work.get(name).add(row.id);
-        break;
+  for (let i = 0; i < ids.length; i += 100) {
+    const { results: rows } = await db.prepare(`SELECT t.id, ${lists.map((list, j) => `${array(canonicalSql, list)} AS "c${j}", ${array(legacySql, list)} AS "l${j}"`).join(", ")}
+      FROM ${qident(t)} t WHERE t.deleted_at IS NULL AND t.id IN (SELECT value FROM json_each(?))`)
+      .bind(JSON.stringify(ids.slice(i, i + 100))).all();
+    const { results: proofs } = await db.prepare("SELECT id, inputs_hash FROM provenance WHERE deleted_at IS NULL AND id IN (SELECT value FROM json_each(?))")
+      .bind(JSON.stringify(rows.flatMap((row) => props.map((p) => `${t}:${row.id}:${p.col}`)))).all();
+    const proven = new Map(proofs.map((p) => [p.id, p.inputs_hash]));
+    for (const row of rows) {
+      const hashes = await Promise.all(lists.map((_, j) => Promise.all([sha256hex(row[`c${j}`]), sha256hex(row[`l${j}`])])));
+      for (const [name, cols] of byName) {
+        const fresh = (p) => hashes[lists.indexOf(JSON.stringify(p.inputs ?? []))].includes(proven.get(`${t}:${row.id}:${p.col}`));
+        if (cols.every(fresh)) continue;
+        if (!work.has(name)) work.set(name, []);
+        work.get(name).push(row.id);
       }
     }
   }
@@ -309,10 +333,8 @@ export async function deriveStale(db, env, table, rows, { fetchImpl = fetch, lim
   try {
     const { typeOf, byName } = await derivationProps(db, t);
     if (!byName.size) return out;
-    ({ results: rows } = await db.prepare(`SELECT * FROM ${qident(t)} WHERE deleted_at IS NULL AND id IN (SELECT value FROM json_each(?))`)
-      .bind(JSON.stringify([...new Set(rows.map((row) => row.id))])).all());
-    for (const [name, ids] of await staleWork(db, t, typeOf, byName, rows)) {
-      const r = await deriveRows(db, env, t, [...ids].slice(0, limit), { fetchImpl, names: new Set([name]) });
+    for (const [name, ids] of await staleWork(db, t, typeOf, byName, [...new Set(rows.map((row) => row.id))])) {
+      const r = await deriveRows(db, env, t, ids.slice(0, limit), { fetchImpl, names: new Set([name]) });
       out.derived += r.derived;
       out.failed.push(...r.failed);
     }

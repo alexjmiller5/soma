@@ -448,7 +448,10 @@ reads never provision either store or rewrite saved definitions.
   Pushes budget 750 SQL statements, background derivations another 200, and
   direct/scheduled derivations share 900 across all nested callers, including
   precommit reads. Exhaustion preserves committed progress and reports pending
-  work in failed; subsequent calls/sweeps resume. SQL text is bounded at D1's 100KB limit. Typed history uses bounded trigger bodies, keeping each cell's evidence sequence intact and all triggers in the same mutation transaction. Ordinary 500-row writes use bulk
+  work in failed; subsequent calls/sweeps resume. A derivation starts only while
+  the remaining budget covers the costliest one so far, so an external call is
+  never made for a commit that cannot fit; freshness is judged in bulk (two
+  reads per 100 rows, one rendering per distinct input list). SQL text is bounded at D1's 100KB limit. Typed history uses bounded trigger bodies, keeping each cell's evidence sequence intact and all triggers in the same mutation transaction. Ordinary 500-row writes use bulk
   upserts. Budget exhaustion is retryable per row; sync leaves its push cursor
   unchanged whenever any row rejects. Core and Python sync re-push
   `write-budget` and `retryable` rows in halved batches within the round, so

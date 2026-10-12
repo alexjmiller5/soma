@@ -784,3 +784,53 @@ test("a sparse push of an unrelated column does not re-derive from inputs it omi
     expect(db.db.query("SELECT blurb FROM movies WHERE id = '78'").get().blurb).toBe("a blurb");
   } finally { upstream.mockRestore(); }
 });
+
+// A wide derivation: one ISRC lookup producing `outputs` columns, 50 rows.
+async function tracks(outputs) {
+  const db = new D1Shim(), cols = Array.from({ length: outputs }, (_, i) => `o${i}`);
+  db.db.exec(`CREATE TABLE catalog_properties (id TEXT PRIMARY KEY, tbl TEXT, col TEXT, label TEXT, sort INTEGER, type TEXT, required INTEGER, default_value TEXT, options TEXT, options_sql TEXT, min_items INTEGER, max_items INTEGER, pattern TEXT, ref_table TEXT, derived_by TEXT, inputs TEXT, immutable INTEGER, deprecated INTEGER, description TEXT, source TEXT, source_ref TEXT, created_at TEXT, updated_at TEXT, deleted_at TEXT)`);
+  db.db.exec(`CREATE TABLE provenance (id TEXT PRIMARY KEY, from_kind TEXT, from_ref TEXT, to_kind TEXT, to_ref TEXT, rel TEXT, field TEXT, detail TEXT, asserted_by TEXT, inputs_hash TEXT, value_hash TEXT, produced_at TEXT, created_at TEXT, updated_at TEXT, deleted_at TEXT, hub_at TEXT)`);
+  db.db.exec(`CREATE TABLE tracks (id TEXT PRIMARY KEY, isrc TEXT, ${cols.map((c) => `${c} TEXT`).join(", ")}, created_at TEXT, updated_at TEXT, deleted_at TEXT, hub_at TEXT)`);
+  db.db.exec("INSERT INTO catalog_properties (id, tbl, col, sort, type) VALUES ('tracks.isrc','tracks','isrc',0,'text')");
+  cols.forEach((c, i) => db.db.exec(`INSERT INTO catalog_properties (id, tbl, col, sort, type, derived_by, inputs) VALUES ('tracks.${c}','tracks','${c}',${i + 1},'text','http:isrc','["isrc"]')`));
+  const ids = Array.from({ length: 50 }, (_, i) => `t${String(i).padStart(2, "0")}`);
+  for (const id of ids) db.db.query("INSERT INTO tracks (id, isrc, updated_at) VALUES (?, ?, '2026-01-01T00:00:00.000Z')").run(id, `ISRC${id}`);
+  const fetchImpl = async () => Response.json(Object.fromEntries(cols.map((c) => [c, "v"])));
+  return { db, cols, ids, env: { DERIVATIONS: JSON.stringify({ isrc: { url: "https://derivations.example/isrc" } }) }, fetchImpl };
+}
+const counted = (fetchImpl) => { const calls = []; return { calls, fetchImpl: async (url, init) => { calls.push(JSON.parse(init.body).id); return fetchImpl(url, init); } }; };
+
+test("freshness checks over many fresh proofs leave budget for the source calls", async () => {
+  const { db, cols, ids, env, fetchImpl } = await tracks(12);
+  // every output proven but the last: a per-cell scan reads 23 statements a row
+  for (const id of ids) for (const c of cols.slice(0, -1)) {
+    db.db.query(`INSERT INTO provenance (id, to_kind, to_ref, field, from_kind, from_ref, rel, asserted_by, inputs_hash, value_hash, produced_at)
+      VALUES (?, 'tracks', ?, ?, 'http:isrc', 'x', 'derived_from', 'hub', ?, ?, '2026-01-02T00:00:00.000Z')`)
+      .run(`tracks:${id}:${c}`, id, c, await hex(`["ISRC${id}"]`), await hex(""));
+  }
+  let statements = 0, beforeFirstCall = null;
+  const prepare = db.prepare.bind(db);
+  db.prepare = (sql) => { statements++; return prepare(sql); };
+  const s = counted(async (url, init) => { beforeFirstCall ??= statements; return fetchImpl(url, init); });
+  let out = await sweep(db, env, { fetchImpl: s.fetchImpl });
+  expect(beforeFirstCall).toBeLessThan(30); // freshness is read in bulk, not per row or cell
+  expect(out.derived).toBeGreaterThan(0);
+  expect(s.calls.length).toBe(out.derived); // no fetched row lost its commit
+  expect(out.derived + new Set(out.failed.map((f) => f.id)).size).toBe(50);
+  for (let i = 0; out.failed.length && i < 5; i++) out = await sweep(db, env, { fetchImpl: s.fetchImpl });
+  expect(out.failed).toEqual([]);
+  expect(db.db.query(`SELECT count(*) AS n FROM tracks WHERE ${cols.at(-1)} = 'v'`).get().n).toBe(50);
+});
+
+test("a direct batch derives what its budget can commit and defers the rest before calling out", async () => {
+  const { db, ids, env, fetchImpl } = await tracks(7);
+  const s = counted(fetchImpl);
+  const out = await deriveRows(db, env, "tracks", ids, { fetchImpl: s.fetchImpl });
+  expect(out.derived).toBeGreaterThanOrEqual(21);
+  expect(s.calls.length).toBe(out.derived);
+  const pending = out.failed.map((f) => f.id);
+  expect(new Set([...s.calls, ...pending]).size).toBe(50);
+  for (const f of out.failed) expect(f).toMatchObject({ col: "o0", error: expect.stringContaining("budget") });
+  const again = await deriveRows(db, env, "tracks", pending, { fetchImpl: s.fetchImpl });
+  expect(s.calls.length).toBe(out.derived + again.derived);
+});
