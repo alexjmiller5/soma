@@ -1151,8 +1151,8 @@ consumer reads them, never in this repo.
 
 | Consumer | Credential | Held in |
 |---|---|---|
-| Networth | profile `networth-reader-v2` (broad `tables:read`: it reads `provenance` slices); operator token `networth-interim` until that enrollment is approved | Networth ENV `SOMA_HUB_TOKEN` (Worker secret) |
-| Task Burndown | profile `task-burndown-reader-v1` (projected tasks/projects reads); operator token `task-burndown-workflow-reader-v1` until that enrollment is approved | Task Burndown ENV `SOMA_HUB_TOKEN` (Worker secret) |
+| Networth | profile `networth-reader-v2` (broad `tables:read`: it reads `provenance` slices) | Networth ENV `SOMA_HUB_TOKEN` (Worker secret) |
+| Task Burndown | profile `task-burndown-reader-v1` (projected tasks/projects reads incl. `hub_at` for cursor pulls), enrolled headless with `soma login --profile ... --start/--claim` | Task Burndown ENV `SOMA_HUB_TOKEN` (Worker secret) |
 | Bookmarks Sync | profile `bookmarks-sync-writer-v1` | Bookmarks Sync ENV `SOMA_HUB_TOKEN` (Worker secret) |
 | Media Center poller | profile `media-center-poller-v1` (broad read/write: it inserts `provenance`) | Media Center ENV `SOMA_HUB_TOKEN` (Modal secret) |
 | Media Center apps | profile `media-center`, one enrollment per device | device Keychain |
@@ -1161,7 +1161,7 @@ consumer reads them, never in this repo.
 | Synapse | profile `synapse-workspace-v1` (broad read/write: narrow writes are refused on its capture tables) | `synapse-state` workspace `default`, copy in Synapse ENV `SOMA_HUB_TOKEN` |
 | Reflex | profile `reflex-v2` | Reflex ENV |
 | Birthdays, Circle, Strava Sync | profiles `birthdays-reader-v1`, `birthdays-editor-v1`, `circle-reader`, `strava-sync-v1` | each app's own storage |
-| Flighty Sync, Page Archiver, Shared Album Reminders, Media Center YouTube offline, Bookmark Mirror, Birthdays task writer, Calendar Feeds, OwnTracks phone, People Sync files | pattern C exact operator tokens (`flighty-sync`, Page Archiver's, `shared-album-reminders-mini`, `media-center-youtube-offline`, `bookmark-mirror-macbook`, `birthdays-task-writer`, `calendar-feeds-*`, `phone`, `people-sync-files`); each moves to a profile at its next rotation | each consumer's native secure storage or settings |
+| Flighty Sync, Page Archiver, Shared Album Reminders, Media Center YouTube offline, Bookmark Mirror, Birthdays task writer, Calendar Feeds, OwnTracks phone, People Sync files | pattern C exact operator tokens (`flighty-sync`, Page Archiver's, `shared-album-reminders-mini-v2`, `media-center-youtube-offline`, `bookmark-mirror-macbook`, `birthdays-task-writer`, `calendar-feeds-*` (minted by its `scripts/provision.py`), `phone`, `people-sync-files`); each moves to a profile at its next rotation | each consumer's native secure storage or settings |
 
 ## Durable change recording
 
