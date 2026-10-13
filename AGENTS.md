@@ -1236,7 +1236,7 @@ consumer reads them, never in this repo.
 | Media Center apps | profile `media-center`, one enrollment per device | device Keychain |
 | Music Sync | profile `music-sync-writer-v1` (broad read/write: catalog, derive, `provenance`) | Music Sync ENV `SOMA_HUB_TOKEN` (Modal secret) |
 | Screentime Dashboard | profile `screentime-dashboard-archive-v1` | Screentime Dashboard ENV `SOMA_HUB_TOKEN` (Worker secret) |
-| Synapse | profile `synapse-workspace-v1` (broad read/write: narrow writes are refused on its capture tables) | `synapse-state` workspace `default`, copy in Synapse ENV `SOMA_HUB_TOKEN` |
+| Synapse | profile `synapse-workspace-v2` (121 exact grants: whole-table reads of the tables whose rows it reads, column and `catalog:read` grants for its prompt columns (catalog projection), `tables:write` on its 12 capture/log tables, `raw/synapse-executions/` files; grant rationale in synapse AGENTS.md), enrolled headless with `soma login --profile ... --start/--claim` | `synapse-state` workspace `default`, copy in Synapse ENV `SOMA_HUB_TOKEN` |
 | Reflex | profile `reflex-v2` | Reflex ENV |
 | Agent Dispatch | profile `agent-dispatch-v1` (`subscriptions:consume` on its `tasks.dispatch` subscription, `tables:read:tasks` as subscription consumers require, column reads `id,updated_at,hub_at,dispatch,notes`, patches of `dispatch,notes`), enrolled headless with `soma login --profile ... --start/--claim` | the always-on Mac's login Keychain |
 | Birthdays, Circle, Strava Sync | profiles `birthdays-reader-v1`, `birthdays-editor-v1`, `circle-reader`, `strava-sync-v1` | each app's own storage |
