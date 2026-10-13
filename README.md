@@ -44,6 +44,7 @@ soma sql "INSERT INTO people (name) VALUES ('Ada')"
 soma sql "SELECT * FROM people"            # results as JSON
 soma sql "ALTER TABLE people ADD COLUMN likes TEXT"
 soma table rename people humans            # the ONLY way to rename a table
+soma property rename humans.likes interests # the ONLY way to rename a column
 soma sql "SELECT * FROM history WHERE tbl = 'humans' ORDER BY created_at"
 soma export > backup.sql                   # portable dump, no cloud involved
 ```
@@ -368,6 +369,13 @@ it is a complete backup. Never put the data dir inside a file-sync folder
   (catalog properties and refs, rule SQL, provenance, history) in one
   transaction, as logged DDL. A raw `ALTER TABLE … RENAME TO` through
   `soma sql` is refused because it would leave those references dangling.
+- **`soma property rename TABLE.OLD NEW`** renames a column the same way: its
+  catalog property (rekeyed with its definition), the table's display column,
+  rule columns and the table's own rule/options SQL, derivation inputs,
+  provenance fields and proof ids, `history.col`, and every saved view of that
+  table. SQL on another table that still names the column fails the recompile
+  and rolls the rename back. A raw `ALTER TABLE … RENAME COLUMN` through
+  `soma sql` is refused. Sync columns never move.
 - **`_schema_log`** records every DDL statement in order; replicas replay it.
 - **`_sync_state`** holds the sync cursors.
 - The client is pure Python standard library - no runtime dependencies.
@@ -552,7 +560,11 @@ retaining recoverable work. Consumers require `subscriptions:consume:<id>`
 plus read grants for every source. A delivery repeats until acknowledged;
 polling does not move the cursor. Capacity failures roll back the source
 mutation. Source definitions are immutable; retire a subscription to replace
-them. Existing subscriptions retain their exact stored trigger semantics.
+them. Existing subscriptions retain their exact stored trigger semantics. A
+renamed column follows into the subscriptions that select it once each has
+acknowledged every event: their `sources` and triggers name the new column and
+later events carry it. An unacknowledged event under the old name refuses the
+rename (`409 subscription_schema_conflict`) until the consumer drains it.
 
 ### Files
 

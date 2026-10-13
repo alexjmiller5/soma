@@ -1049,6 +1049,135 @@ def rename_refs(conn, old: str, new: str) -> None:
         conn.execute("UPDATE history SET tbl = ? WHERE tbl = ?", (new, old))
 
 
+# Saved-view definition places that name a column (core/src/saved-views.ts).
+_VIEW_LISTS = ("columns", "wrap")
+_VIEW_PRESENTATION = ("dateColumn", "endDateColumn", "coverColumn", "groupColumn")
+
+
+def _rename_view_column(definition: dict, old: str, new: str) -> dict:
+    def col(c):
+        return new if c == old else c
+
+    def filters(items):
+        return [{**f, "column": col(f.get("column"))} if isinstance(f, dict) else f for f in items]
+
+    d = dict(definition)
+    for key in _VIEW_LISTS:
+        if isinstance(d.get(key), list):
+            d[key] = [col(c) for c in d[key]]
+    if isinstance(d.get("filters"), list):
+        d["filters"] = filters(d["filters"])
+    if isinstance(d.get("groups"), list):
+        d["groups"] = [
+            {**g, "filters": filters(g["filters"])}
+            if isinstance(g, dict) and isinstance(g.get("filters"), list)
+            else g
+            for g in d["groups"]
+        ]
+    if isinstance(d.get("sort"), list):
+        d["sort"] = [
+            {**s, "column": col(s.get("column"))} if isinstance(s, dict) else s for s in d["sort"]
+        ]
+    if isinstance(d.get("widths"), dict):
+        d["widths"] = {col(k): v for k, v in d["widths"].items()}
+    if isinstance(d.get("actions"), list):
+        d["actions"] = [
+            {**a, "values": {col(k): v for k, v in a["values"].items()}}
+            if isinstance(a, dict) and isinstance(a.get("values"), dict)
+            else a
+            for a in d["actions"]
+        ]
+    if isinstance(d.get("layout"), list):
+        d["layout"] = [
+            {**i, "id": col(i.get("id"))}
+            if isinstance(i, dict) and i.get("kind") == "column"
+            else i
+            for i in d["layout"]
+        ]
+    if isinstance(d.get("presentation"), dict):
+        d["presentation"] = {
+            k: col(v) if k in _VIEW_PRESENTATION else v for k, v in d["presentation"].items()
+        }
+    return d
+
+
+def rename_column_refs(conn, table: str, old: str, new: str) -> None:
+    """Point every catalog, provenance, history and saved-view reference to
+    `table.old` at `table.new`. Runs inside the rename's transaction; the caller
+    has already renamed the column itself."""
+    # ponytail: only the table's own rule/options SQL is rewritten, by word
+    # boundary; SQL on other tables naming the column fails the DDL recompile
+    # in `write`, which rejects the rename until that rule is changed by hand
+    word = re.compile(rf"\b{re.escape(old)}\b")
+    if conn.execute(
+        "SELECT 1 FROM catalog_properties WHERE id = ? AND deleted_at IS NULL", (f"{table}.{old}",)
+    ).fetchone():
+        _rekey(conn, "catalog_properties", f"{table}.{old}", f"{table}.{new}", col=new)
+    for p in conn.execute(
+        "SELECT id, options_sql, inputs FROM catalog_properties WHERE tbl = ? AND deleted_at IS NULL",
+        (table,),
+    ).fetchall():
+        if p["options_sql"]:
+            conn.execute(
+                "UPDATE catalog_properties SET options_sql = ? WHERE id = ?",
+                (word.sub(new, p["options_sql"]), p["id"]),
+            )
+        inputs = json.loads(p["inputs"]) if p["inputs"] else None
+        if isinstance(inputs, list) and old in inputs:
+            conn.execute(
+                "UPDATE catalog_properties SET inputs = ? WHERE id = ?",
+                (json.dumps([new if c == old else c for c in inputs]), p["id"]),
+            )
+    conn.execute(
+        "UPDATE catalog_tables SET display = ? WHERE id = ? AND display = ?", (new, table, old)
+    )
+    conn.execute(
+        "UPDATE catalog_rules SET col = ? WHERE tbl = ? AND col = ? AND deleted_at IS NULL",
+        (new, table, old),
+    )
+    for r in conn.execute(
+        "SELECT id, sql FROM catalog_rules WHERE tbl = ? AND sql IS NOT NULL AND deleted_at IS NULL",
+        (table,),
+    ).fetchall():
+        conn.execute(
+            "UPDATE catalog_rules SET sql = ? WHERE id = ?", (word.sub(new, r["sql"]), r["id"])
+        )
+    if _table_exists(conn, "provenance"):
+        # derivation proof ids embed the field (`<to_kind>:<to_ref>:<field>`); edges do not
+        for r in conn.execute(
+            "SELECT id, to_ref FROM provenance WHERE to_kind = ? AND field = ? "
+            "AND rel = 'derived_from' AND id = to_kind || ':' || to_ref || ':' || field "
+            "AND deleted_at IS NULL",
+            (table, old),
+        ).fetchall():
+            _rekey(conn, "provenance", r["id"], f"{table}:{r['to_ref']}:{new}", field=new)
+        conn.execute(
+            "UPDATE provenance SET field = ? WHERE to_kind = ? AND field = ? AND deleted_at IS NULL",
+            (new, table, old),
+        )
+    if _has_shared_views(conn):
+        for v in conn.execute(
+            "SELECT id, definition FROM views WHERE tbl = ?", (table,)
+        ).fetchall():
+            try:
+                definition = json.loads(v["definition"])
+            except (TypeError, ValueError):
+                continue  # an invalid definition is already unavailable; leave it as stored
+            if not isinstance(definition, dict):
+                continue
+            renamed = _rename_view_column(definition, old, new)
+            if renamed == definition:
+                continue
+            # Advance the revision past a synced one that may be ahead of this clock.
+            conn.execute(
+                f"UPDATE views SET definition = ?, updated_at = max({_pkg().NOW}, "
+                "strftime('%Y-%m-%dT%H:%M:%fZ',updated_at,'+0.001 seconds')) WHERE id = ?",
+                (json.dumps(renamed), v["id"]),
+            )
+    if _table_exists(conn, "history"):
+        conn.execute("UPDATE history SET col = ? WHERE tbl = ? AND col = ?", (new, table, old))
+
+
 # --- invariants --------------------------------------------------------------
 
 # Mirror core/src/rule-sql.ts; shared rule-sql-cases.json is the contract.

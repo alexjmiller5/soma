@@ -545,9 +545,17 @@ reads never provision either store or rewrite saved definitions.
   in step.
 - **A soft-deleted row is never validated** (its cells are history, not a
   claim), but its cell changes are still logged.
-- **`rename_table` is the only table rename.** `execute_sql` refuses
-  `ALTER TABLE … RENAME TO` (the guard is `RENAME_TABLE`; RENAME COLUMN stays
-  allowed). The verb runs one `catalog.write(ddl=True)`: the ALTER, a
+- **`rename_table` is the only table rename** and **`rename_column`
+  (`soma property rename`) the only column rename.** `execute_sql` refuses
+  `ALTER TABLE … RENAME TO` (`RENAME_TABLE`) and `… RENAME [COLUMN]`
+  (`RENAME_COLUMN`). `rename_column` runs one `catalog.write(ddl=True)`: the
+  logged ALTER, then `catalog.rename_column_refs` rekeys `<tbl>.<col>` and
+  derivation proof ids, updates the display column, rule `col`, the table's own
+  rule/options SQL (word boundary), `inputs`, provenance `field`,
+  `history.col` and saved-view definitions of that table (columns, filters,
+  groups, sort, widths, wrap, action values, layout, presentation), advancing
+  each view revision like a table rename. SQL elsewhere naming the column fails
+  the recompile and rejects the rename. The verb runs one `catalog.write(ddl=True)`: the ALTER, a
   `DROP TRIGGER IF EXISTS` of the old-named trigger and a CREATE of the
   new-named one (all logged, so they replay), then `catalog.rename_refs`:
   id-keyed rows whose id embeds the table name (`catalog_properties`
@@ -1252,7 +1260,11 @@ implicit outbox destination tables inside their checked policy read set.
 Schema replay permits plain nullable TEXT/INTEGER/REAL/BLOB column additions on
 watched source tables, preserving existing columns and the entire source/outbox
 trigger set. Rowid aliases and `hub_at` additions remain protected because they
-change revision semantics. Other structural changes require retiring affected subscriptions. Private operational
+change revision semantics. A column RENAME on a watched table (never a sync
+column) keeps unaffected triggers byte-identical; subscriptions selecting the
+column follow it only when drained (`acked_seq = last_seq`, no offered
+delivery): the same batch drops their triggers, renames, rewrites both stored
+source lists and creates the regenerated triggers. Other structural changes require retiring affected subscriptions. Private operational
 DDL never enters the replica schema log or catalog. `durable-pull-v1` delivers persisted offered batches through capped long polls
 and explicit ACK receipts. A held poll reads `ChangeSignal`'s seq, then D1, then
 waits on the object (`table` params: its source tables) for a commit naming one;

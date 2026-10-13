@@ -1357,14 +1357,13 @@ def test_rename_table_replays_to_the_hub_and_every_replica(db, hub, tmp_path):
     assert len(execute_sql(db, "SELECT * FROM history WHERE tbl = 'humans'")) == 2
 
 
-def test_sql_rename_table_is_refused_but_rename_column_is_not(db):
+def test_sql_rename_table_is_refused(db):
     _mk_people(db, ["Ada"])
     with pytest.raises(ValueError, match="soma table rename"):
         execute_sql(db, "ALTER TABLE people RENAME TO humans")
     with pytest.raises(ValueError, match="soma table rename"):
         execute_sql(db, "alter table people rename to humans")
-    execute_sql(db, "ALTER TABLE people RENAME COLUMN name TO full_name")
-    assert execute_sql(db, "SELECT full_name FROM people") == [{"full_name": "Ada"}]
+    assert execute_sql(db, "SELECT name FROM people") == [{"name": "Ada"}]
 
 
 def test_cli_table_rename(monkeypatch, tmp_path, capsys):

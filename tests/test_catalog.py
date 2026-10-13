@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from soma import connect, create_table, execute_sql, init, insert_rows
+from soma import connect, create_table, execute_sql, init, insert_rows, rename_column
 from soma.catalog import (
     ValidationError,
     Violation,
@@ -302,7 +302,7 @@ def test_dropping_a_column_is_not_blocked_by_a_legacy_row(db):
     insert_rows(db, "places", [{"id": "old", "name": "legacy", "status": "Weird", "junk": "x"}])
     set_property(db, "places", "status", type="select", options=[{"v": "want"}])
     execute_sql(db, "ALTER TABLE places DROP COLUMN junk")
-    execute_sql(db, "ALTER TABLE places RENAME COLUMN name TO title")
+    rename_column(db, "places", "name", "title")
     cols = {r["name"] for r in execute_sql(db, "PRAGMA table_info(places)")}
     assert "junk" not in cols and "title" in cols
     with pytest.raises(ValidationError):  # touching the row still validates it
@@ -563,7 +563,7 @@ def test_ddl_recompiles_rules(db):
         sql="SELECT id FROM places WHERE category = 'z'",
     )
     with pytest.raises(ValidationError, match="no longer compiles"):
-        execute_sql(db, "ALTER TABLE places RENAME COLUMN category TO cat")
+        execute_sql(db, "ALTER TABLE places DROP COLUMN category")
 
 
 def test_before_and_changed_share_shape_for_set_ops(db):

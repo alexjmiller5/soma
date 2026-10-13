@@ -27,6 +27,7 @@ SAFETY_SECONDS = 600  # with live change signals, a slow round still catches a m
 NOW = "strftime('%Y-%m-%dT%H:%M:%fZ','now')"
 DDL_KEYWORDS = {"CREATE", "ALTER", "DROP"}
 RENAME_TABLE = re.compile(r"^\s*ALTER\s+TABLE\s+\S+\s+RENAME\s+TO\b", re.IGNORECASE)
+RENAME_COLUMN = re.compile(r"^\s*ALTER\s+TABLE\s+\S+\s+RENAME\s+(?!TO\b)", re.IGNORECASE)
 CHUNK = 200  # rows per upsert (one JSON parameter regardless of row width)
 DERIVE_CHUNK = 50  # max ids per /v1/derive call
 RETRY_DELAYS = (1, 4, 15)  # seconds before each retry of an idempotent hub request
@@ -121,6 +122,11 @@ def execute_sql(path: Path, sql: str) -> list[dict]:
         raise ValueError(
             "renaming a table through SQL leaves the catalog, provenance and history "
             "pointing at the old name - use `soma table rename OLD NEW`"
+        )
+    if RENAME_COLUMN.match(sql):
+        raise ValueError(
+            "renaming a column through SQL leaves its catalog property, history and saved "
+            "views pointing at the old name - use `soma property rename TABLE.OLD NEW`"
         )
     if _first_word(sql) in READ_KEYWORDS:
         with connect(path) as conn:
@@ -273,6 +279,33 @@ def rename_table(path: Path, old: str, new: str) -> None:
             conn.execute("INSERT INTO _schema_log (ddl) VALUES (?)", (stmt,))
         catalog.rename_refs(conn, old, new)
         changes.rename(conn, old, new)
+
+    catalog.write(path, run, ddl=True)
+
+
+def rename_column(path: Path, table: str, old: str, new: str) -> None:
+    """Rename a column and every reference to it - its catalog property, the
+    table's rules, derivation inputs, provenance, history and saved views - in
+    one transaction, as logged DDL that replays to the hub and every replica.
+    The only sanctioned way to rename a column."""
+    qi(new)  # validates the identifier
+    if table in catalog.CATALOG_TABLES or table.startswith("_"):
+        raise ValueError(f"{table} is an engine table")
+    if {old, new} & catalog.SYNC_COLS:
+        raise ValueError(f"{min({old, new} & catalog.SYNC_COLS)} is a sync column")
+
+    def run(conn):
+        if not catalog._table_exists(conn, table):
+            raise ValueError(f"no such table: {table}")
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({qi(table)})")}
+        if old not in cols:
+            raise ValueError(f"no such column: {table}.{old}")
+        if new in cols:
+            raise ValueError(f"column already exists: {table}.{new}")
+        stmt = f"ALTER TABLE {qi(table)} RENAME COLUMN {qi(old)} TO {qi(new)}"
+        conn.execute(stmt)
+        conn.execute("INSERT INTO _schema_log (ddl) VALUES (?)", (stmt,))
+        catalog.rename_column_refs(conn, table, old, new)
 
     catalog.write(path, run, ddl=True)
 
@@ -1929,6 +1962,12 @@ def main(argv: list[str] | None = None) -> int:
     pr_list.add_argument("table", nargs="?")
     pr_rm = pr_sub.add_parser("rm", help="soft-delete a property: <table>.<column>")
     pr_rm.add_argument("ref")
+    pr_rename = pr_sub.add_parser(
+        "rename",
+        help="rename a column and every catalog/history/view reference to it: <table>.<column> NEW",
+    )
+    pr_rename.add_argument("ref")
+    pr_rename.add_argument("new")
     p_rule = sub.add_parser("rule", help="catalog rules (invariant, doctrine, audit)")
     ru_sub = p_rule.add_subparsers(dest="rule_command", required=True)
     ru_set = ru_sub.add_parser("set", help="upsert a rule by id")
@@ -2176,6 +2215,10 @@ def _dispatch(args: argparse.Namespace, path: Path) -> int:
         elif args.property_command == "list":
             with connect(path) as conn:
                 print(json.dumps(catalog.properties(conn, args.table), indent=2))
+        elif args.property_command == "rename":
+            tbl, col = args.ref.split(".", 1)
+            rename_column(path, tbl, col, args.new)
+            print(f"renamed {args.ref} -> {tbl}.{args.new}")
         else:
             tbl, col = args.ref.split(".", 1)
             catalog.rm_property(path, tbl, col)
