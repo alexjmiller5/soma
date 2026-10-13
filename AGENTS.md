@@ -544,7 +544,7 @@ reads never provision either store or rewrite saved definitions.
   the markers covering those rows (its own logged event for the edit carries
   the old value), and replicas filter covered rows out of every pull. Inserts are not filtered. Purging again
   moves `purged_at` forward to cover a re-import. Only `soma purge` writes
-  `purges`; engine tables are never purge targets. Keep both implementations
+  `purges`; provenance is purgeable user evidence, while other engine tables remain protected. Keep both implementations
   in step.
 - **A soft-deleted row is never validated** (its cells are history, not a
   claim), but its cell changes are still logged.

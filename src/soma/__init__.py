@@ -580,7 +580,11 @@ def purge(path: Path, table: str, row_id: str, cols: list[str] | None = None) ->
     """Remove a row, or its listed columns' history, here and - through sync -
     on the hub and every replica. Redact a column's live value with a normal
     write first; this removes the trail of old values."""
-    if table.startswith(("_", "sqlite_")) or table in catalog.CATALOG_TABLES or table == PURGES:
+    if (
+        table.startswith(("_", "sqlite_"))
+        or (table in catalog.CATALOG_TABLES and table != "provenance")
+        or table == PURGES
+    ):
         raise ValueError(f"{table} is an engine table")
     qi(table)
     with connect(path) as conn:

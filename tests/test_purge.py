@@ -110,9 +110,7 @@ def test_purging_again_keeps_one_marker_and_removes_a_recreated_row(db, monkeypa
     assert marker["purged_at"] == ticks[0]
 
 
-@pytest.mark.parametrize(
-    "table", ["history", "purges", "provenance", "catalog_properties", "_sync_state"]
-)
+@pytest.mark.parametrize("table", ["history", "purges", "catalog_properties", "_sync_state"])
 def test_purge_refuses_engine_tables(db, table):
     with pytest.raises(ValueError, match="engine table"):
         purge(db, table, "r1")
@@ -299,3 +297,24 @@ def test_a_replica_does_not_take_covered_copies_from_the_hub(pair):
     soma.sync(b, hub)
     assert _rows(b, "items") == []
     assert _history(b) == []
+
+
+def test_purge_provenance_removes_edge_and_its_history_on_every_replica(pair):
+    a, b, hub = pair
+    execute_sql(
+        a, "UPDATE provenance SET detail = '{\"value\":\"private\"}' WHERE id = 'manual:x:r1'"
+    )
+    assert not soma.sync(a, hub)["rejected"]
+    assert not soma.sync(b, hub)["rejected"]
+    assert purge(a, "provenance", "manual:x:r1") == {"markers": 1}
+    assert not soma.sync(a, hub)["rejected"]
+    assert not soma.sync(b, hub)["rejected"]
+    for path in (a, b, hub.path):
+        assert _rows(path, "provenance", "manual:x:r1") == []
+        assert (
+            execute_sql(
+                path, "SELECT id FROM history WHERE tbl='provenance' AND row_id='manual:x:r1'"
+            )
+            == []
+        )
+        assert _rows(path, "items"), "Purging evidence preserves its subject"
