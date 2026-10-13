@@ -1230,7 +1230,7 @@ consumer reads them, never in this repo.
 | Consumer | Credential | Held in |
 |---|---|---|
 | Networth | profile `networth-reader-v2` (broad `tables:read`: it reads `provenance` slices) | Networth ENV `SOMA_HUB_TOKEN` (Worker secret) |
-| Task Burndown | profile `task-burndown-reader-v1` (projected tasks/projects reads incl. `hub_at` for cursor pulls), enrolled headless with `soma login --profile ... --start/--claim` | Task Burndown ENV `SOMA_HUB_TOKEN` (Worker secret) |
+| Task Burndown | profile `task-burndown-reader-v2` (projected tasks/projects reads incl. `closed_date` and `hub_at` for cursor pulls), enrolled headless with `soma login --profile ... --start/--claim` | Task Burndown ENV `SOMA_HUB_TOKEN` (Worker secret) |
 | Bookmarks Sync | profile `bookmarks-sync-writer-v1` | Bookmarks Sync ENV `SOMA_HUB_TOKEN` (Worker secret) |
 | Media Center poller | profile `media-center-poller-v2` (46 exact grants: column reads, `feed_since` patches, item writes with `provenance:create:<table>`; definition in media-center `docs/poller-profile.json`) | Media Center ENV `SOMA_HUB_TOKEN` (Modal secret) |
 | Media Center apps | profile `media-center`, one enrollment per device | device Keychain |
