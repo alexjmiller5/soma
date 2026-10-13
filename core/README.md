@@ -777,7 +777,8 @@ snapshot across separate requests when another client edits records.
 `prepareReadPlan` prepares version 1 title-list or capped-count SQL for an ordinary
 catalogued table, optionally using a selected saved view and its expected revision.
 It uses the same `view.ts` compiler as eager reads. Calendar bindings are tagged at
-their emission sites; literal values equal to today remain literal. The host supplies
+their emission sites (`today`, `start`, `end`, `localStart`, `localEnd`, and `now`,
+`localNow` for relative now); literal values equal to today remain literal. The host supplies
 stable opaque workspace/replica identities and resolves the saved timezone/day-start
 policy at extension read time. Lists select only ID and configured display column,
 at most 20 rows. Count probes at most 10,001 IDs; a value above 10,000 is a lower

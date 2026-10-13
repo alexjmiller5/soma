@@ -49,7 +49,7 @@ test('real plan rebinds relative operands while an equal literal stays literal a
   for(const [id,due,name] of [['a','2026-10-07','2026-10-07'],['b','2026-10-08','2026-10-07'],['c','2026-10-08','2026-10-08'],['n',null,'2026-10-07']]) await db.run('INSERT INTO items(id,due,name) VALUES (?,?,?)',[id,due,name]);
   const input=await saved(db,[{column:'due',op:'eq',relative:'today'},{column:'name',op:'eq',value:'2026-10-07'}]);
   const plan=await core.prepareReadPlan(db,input);
-  expect(plan.parameters.filter(p=>p.kind==='calendar').map(p=>p.slot)).toEqual(['today','start','end']);
+  expect(plan.parameters.filter(p=>p.kind==='calendar').map(p=>p.slot)).toEqual(['today','localStart','localEnd','start','end']);
   expect(plan.parameters).toContainEqual({kind:'literal',value:'2026-10-07'});
   for(const day of ['2026-10-07','2026-10-08']) {
     const calendar=context(day), view=(await core.loadSavedView(db,'today-view')).view!;
@@ -57,6 +57,19 @@ test('real plan rebinds relative operands while an equal literal stays literal a
     expect(await execute(db,plan,calendar)).toEqual(await db.all(eager.sql,eager.params));
   }
   expect((await execute(db,plan,context('2026-10-08'))).map(r=>r.id)).toEqual(['b']);
+});
+
+test('a relative now plan binds the host clock slots and matches the eager query',async()=>{
+  const db=await fixture();
+  for(const [id,due] of [['date','2026-10-08'],['past','2026-10-08T09:00'],['later','2026-10-08T18:00'],['instant','2026-10-08T11:00:00.000Z'],['tomorrow','2026-10-09']]) await db.run('INSERT INTO items(id,due,name) VALUES (?,?,?)',[id,due,id]);
+  const input=await saved(db,[{column:'due',op:'lte',relative:'now'}]);
+  const plan=await core.prepareReadPlan(db,input);
+  expect(plan.parameters.filter(p=>p.kind==='calendar').map(p=>p.slot)).toEqual(['today','localNow','now']);
+  const calendar={...context('2026-10-08'),now:'2026-10-08T12:00:00.000Z',localNow:'2026-10-08T12:00',localStart:'2026-10-08T03:00',localEnd:'2026-10-09T03:00'};
+  const view=(await core.loadSavedView(db,'today-view')).view!;
+  const eager=core.compileView({...view,calendar,columns:plan.columns,limit:20},(await core.readCatalog(db)).properties);
+  expect(await execute(db,plan,calendar)).toEqual(await db.all(eager.sql,eager.params));
+  expect((await execute(db,plan,calendar)).map(r=>r.id)).toEqual(['date','instant','past']);
 });
 
 test.each([

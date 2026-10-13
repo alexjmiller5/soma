@@ -2195,8 +2195,10 @@
     "FilterRelative": {
       "type": "string",
       "enum": [
-        "today"
-      ]
+        "today",
+        "now"
+      ],
+      "description": "today compares with the host's current policy day (eq, ne, lt, lte, gt, gte). now (lt, lte, gt, gte) compares date-only values as today does, YYYY-MM-DDTHH:MM local times with localNow and UTC instants with now."
     },
     "FilterGroup": {
       "type": "object",
@@ -2231,6 +2233,22 @@
         },
         "end": {
           "type": "string"
+        },
+        "now": {
+          "type": "string",
+          "description": "Exact UTC millisecond instant of the host clock reading, within [start, end). Required by relative now."
+        },
+        "localNow": {
+          "type": "string",
+          "description": "The same reading as YYYY-MM-DDTHH:MM wall-clock time in the policy zone. Required by relative now."
+        },
+        "localStart": {
+          "type": "string",
+          "description": "start as YYYY-MM-DDTHH:MM wall-clock time in the policy zone. With localEnd it places YYYY-MM-DDTHH:MM local times on their policy day; without them those values match no relative today filter and calendarRows lists them undated."
+        },
+        "localEnd": {
+          "type": "string",
+          "description": "end as YYYY-MM-DDTHH:MM wall-clock time in the policy zone (exclusive)."
         }
       },
       "required": [
@@ -5128,7 +5146,11 @@
       "enum": [
         "today",
         "start",
-        "end"
+        "end",
+        "now",
+        "localNow",
+        "localStart",
+        "localEnd"
       ]
     },
     "ReadPlanLiteral": {

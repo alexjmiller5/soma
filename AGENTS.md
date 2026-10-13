@@ -22,7 +22,8 @@ Board rendering. The canonical validator checks referenced live catalog properti
 `calendarRows` and `boardRows` are pure shared presentation operations over loaded
 rows; they do not bypass query pagination or write records. Calendar hosts provide
 civil-day bounds through the existing timezone/day-boundary contract. Date-only
-range ends are inclusive and timed range ends exclusive. Unknown Board select
+range ends are inclusive and timed range ends exclusive. A floating local time lands
+on the day whose `localStart`/`localEnd` hold it, and stays undated without them. Unknown Board select
 values remain visible after configured options, followed by the empty column.
 An optional v2 `wrap` lists distinct catalogued columns whose cells wrap their full
 text (absent: none wrap); like `widths` it is presentation only and never reaches the
@@ -99,8 +100,11 @@ reads never provision either store or rewrite saved definitions.
   contracts and current boundaries. `worker/src/validate.js` re-exports the
   shared validator and adds hub-specific validation.
   `tests/fixtures/validation-cases.json` is the Python/TypeScript contract.
-  The `date_or_datetime` TEXT property preserves either existing date-only or
-  UTC-millisecond precision. Relative queries use the host calendar context;
+  The `date_or_datetime` TEXT property holds a date-only `YYYY-MM-DD` (the
+  default shape), a floating local time `YYYY-MM-DDTHH:MM` (no seconds or zone)
+  or a UTC-millisecond instant, and preserves that precision. Relative `today`
+  and `now` queries use the host calendar context (`localStart`/`localEnd` place a
+  local time on its policy day, `now`/`localNow` are the clock reading);
   callers never truncate instants or turn all-day dates into midnight values.
   Core sync walks catalogs first, then each table after the tables its catalog
   refs point at (name order otherwise, `history` last), so a new row and a

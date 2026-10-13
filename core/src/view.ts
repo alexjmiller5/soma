@@ -1,4 +1,4 @@
-import { qident, validEditTimestamp, type Property, type Row } from "./validate.ts";
+import { qident, validEditTimestamp, validLocalTime, type Property, type Row } from "./validate.ts";
 import { compileSearch } from './search.ts';
 
 import type { View, Filter, CalendarContext, CalendarSlot, ReadPlanKind, ReadPlanParameter } from './contract.generated.ts';
@@ -54,10 +54,16 @@ export function validateView(view: View, properties: Property[]): void { compile
 
 export function validateCalendarContext(value: CalendarContext | undefined): CalendarContext | undefined {
   if (value === undefined) return undefined;
-  checkObject(value, ['today','start','end'], 'calendar');
+  checkObject(value, ['today','start','end','now','localNow','localStart','localEnd'], 'calendar');
+  const start=Date.parse(value.start),end=Date.parse(value.end);
   if (typeof value.today !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value.today)
     || !validEditTimestamp(value.today+'T00:00:00.000Z') || !validEditTimestamp(value.start) || !validEditTimestamp(value.end)
-    || Date.parse(value.end)<=Date.parse(value.start) || Date.parse(value.end)-Date.parse(value.start)>27*3600000) throw new Error('Invalid calendar context');
+    || end<=start || end-start>27*3600000
+    // The clock reading lies inside the interval; local slots are floating local times.
+    || (value.now!==undefined && (!validEditTimestamp(value.now) || Date.parse(value.now)<start || Date.parse(value.now)>=end))
+    || [value.localNow,value.localStart,value.localEnd].some(v=>v!==undefined && !validLocalTime(v))
+    || (value.localStart===undefined)!==(value.localEnd===undefined)
+    || (value.localStart!==undefined && value.localEnd!<=value.localStart)) throw new Error('Invalid calendar context');
   return value;
 }
 
@@ -119,28 +125,38 @@ function compile(view: View, properties: Property[], requireCalendar: boolean | 
     // CASE guards both JSON functions, including against legacy malformed cells.
     const array = `CASE WHEN json_valid(${col}) THEN CASE WHEN json_type(${col}) = 'array' THEN ${col} END END`;
     if (filter.relative !== undefined) {
-      if (filter.relative!=='today' || Object.hasOwn(filter,'value') || !['date','datetime','date_or_datetime'].includes(type ?? '')
-        || !['eq','ne','gt','gte','lt','lte'].includes(filter.op)) throw new Error('Invalid relative date filter');
+      const now=filter.relative==='now';
+      if ((filter.relative!=='today' && !now) || Object.hasOwn(filter,'value') || !['date','datetime','date_or_datetime'].includes(type ?? '')
+        || !(now ? ['gt','gte','lt','lte'] : ['eq','ne','gt','gte','lt','lte']).includes(filter.op)) throw new Error('Invalid relative date filter');
       if (!calendar && requireCalendar !== 'plan') {
         if (requireCalendar) throw new Error('Relative query requires a calendar context');
         return '0';
       }
+      if (now && calendar && (calendar.now===undefined || calendar.localNow===undefined)) throw new Error('Relative now query requires the host clock');
       const op={eq:'=',ne:'!=',gt:'>',gte:'>=',lt:'<',lte:'<='}[filter.op as 'eq'|'ne'|'gt'|'gte'|'lt'|'lte'];
       const dateOnly=`(length(${col})=10 AND ${col} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(${col},'+0 days')=${col})`;
+      // A floating local time (YYYY-MM-DDTHH:MM) compares as text with local slots.
+      const local=`(length(${col})=16 AND ${col} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-2][0-9]:[0-5][0-9]' AND strftime('%Y-%m-%dT%H:%M',${col})=${col})`;
       const dateComparison=`${col} ${op} ${bindCalendar('today')}`;
       const instant=`julianday(${col})`;
-      const bound=(slot:CalendarSlot)=>`julianday(${bindCalendar(slot)})`;
-      let timed:string;
-      switch(filter.op) {
-        case 'eq':timed=`${instant} >= ${bound('start')} AND ${instant} < ${bound('end')}`;break;
-        case 'ne':timed=`${instant} < ${bound('start')} OR ${instant} >= ${bound('end')}`;break;
-        case 'gt':timed=`${instant} >= ${bound('end')}`;break;
-        case 'gte':timed=`${instant} >= ${bound('start')}`;break;
-        case 'lt':timed=`${instant} < ${bound('start')}`;break;
-        default:timed=`${instant} < ${bound('end')}`;
-      }
+      // The same interval test over instants or, with local bounds, floating local times.
+      const interval=(value:string,bound:(slot:'start'|'end')=>string)=>{
+        switch(filter.op) {
+          case 'eq':return `${value} >= ${bound('start')} AND ${value} < ${bound('end')}`;
+          case 'ne':return `${value} < ${bound('start')} OR ${value} >= ${bound('end')}`;
+          case 'gt':return `${value} >= ${bound('end')}`;
+          case 'gte':return `${value} >= ${bound('start')}`;
+          case 'lt':return `${value} < ${bound('start')}`;
+          default:return `${value} < ${bound('end')}`;
+        }
+      };
+      // Without local bounds (an older host) a local time matches no relative today.
+      const floating=now ? `${col} ${op} ${bindCalendar('localNow')}`
+        : requireCalendar==='plan' || calendar?.localStart!==undefined ? interval(col,slot=>bindCalendar(slot==='start'?'localStart':'localEnd')) : '0';
+      // Bind in SQL text order: today, the local slots, then the instant slots.
+      const timed=now ? `${instant} ${op} julianday(${bindCalendar('now')})` : interval(instant,slot=>`julianday(${bindCalendar(slot)})`);
       const zoned=`(${col} GLOB '????-??-??T??:??*' AND (substr(${col},-1)='Z' OR (substr(${col},-6,1) IN ('+','-') AND substr(${col},-3,1)=':')))`;
-      return `(CASE WHEN ${dateOnly} THEN ${dateComparison} WHEN ${zoned} THEN (${timed}) ELSE 0 END)`;
+      return `(CASE WHEN ${dateOnly} THEN ${dateComparison} WHEN ${local} THEN (${floating}) WHEN ${zoned} THEN (${timed}) ELSE 0 END)`;
     }
     switch (filter.op) {
       case "empty":

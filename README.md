@@ -476,10 +476,12 @@ groups combine with AND; each `{match: "all" | "any", filters}` group uses
 AND or OR internally. Groups cannot nest. Queries permit at most 16 groups,
 64 filters per group, 128 filters total and 16 ordered sort clauses.
 
-`date_or_datetime` is a TEXT catalog property accepting either the existing
-`date` format (`YYYY-MM-DD`) or the existing `datetime` format (UTC ISO-8601
-with milliseconds). Values keep their precision; it never converts an all-day
-date to midnight. Normalize offset-bearing source instants before writing and
+`date_or_datetime` is a TEXT catalog property accepting the existing `date`
+format (`YYYY-MM-DD`), a floating local time (`YYYY-MM-DDTHH:MM`, no seconds or
+zone: that wall-clock time wherever the reader is) or the existing `datetime`
+format (UTC ISO-8601 with milliseconds). The date and time must exist. Values keep
+their precision; it never converts an all-day date to midnight. Date-only is the
+default shape; sorting as text puts a date before the timed values of its day. Normalize offset-bearing source instants before writing and
 retain any original source object separately. Existing `date` and `datetime`
 properties keep their narrower validation. Nullability follows the property.
 
@@ -487,15 +489,27 @@ properties keep their narrower validation. Nullability follows the property.
 the current local day. Relative filters also support `eq`, `ne`, `lt`, `gt`
 and `gte`, and cannot include `value`. The saved definition retains an optional `timeZone`
 (omitted means the reading device's current zone) and optional `dayStartMinutes`
-(integer 0 through 1439, omitted means midnight). The host resolves that policy and supplies runtime `calendar: {today, start, end}`.
+(integer 0 through 1439, omitted means midnight). The host resolves that policy and supplies runtime
+`calendar: {today, start, end, now, localNow, localStart, localEnd}` (the last four are optional in the
+contract; Iris always supplies them).
 `today` labels the civil date on which the current policy interval began;
 the bounds are consecutive configured local boundaries expressed as exact UTC
 millisecond timestamps, with an exclusive end. For a boundary in a daylight-saving
 gap use the next valid local instant; for a repeated boundary use its first
 occurrence. Resolve each boundary in the named timezone, never by subtracting a
 fixed UTC offset. Date-only comparisons use `today`; timed comparisons use the
-interval without changing source values. Refresh at the policy boundary and on
-resume. Never persist this runtime clock.
+interval without changing source values. `localStart`/`localEnd` are the same
+boundaries as `YYYY-MM-DDTHH:MM` wall-clock times in the policy zone: a floating
+local time belongs to the day they hold, the local date of (time - day start).
+Without them a floating value matches no relative `today` filter.
+
+`{column, op: "lte", relative: "now"}` (only `lt`, `lte`, `gt`, `gte`) compares with
+the host clock: date-only values compare as `today` does (a date-only value due today
+counts all day), floating local times compare as text with `localNow` (the clock as
+`YYYY-MM-DDTHH:MM` in the policy zone) and UTC instants with `now` (the exact
+instant, inside `[start, end)`). Executing it without both clock slots fails.
+Refresh at the policy boundary, when the next timed value in the view comes due and
+on resume. Never persist this runtime clock.
 Absent or invalid calendar context rejects execution instead of broadening it.
 
 Sort `mode: "options"` uses catalog option order. Multi-selects use the
