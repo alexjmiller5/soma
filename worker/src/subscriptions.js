@@ -2,6 +2,7 @@ import {trustedContinuityTrigger} from './governance-continuity.js';
 import { checkedReads, readGuards } from './write.js';
 import { scopedTable, timestampTrigger } from './scopes.js';
 import { subscriptionTriggers, trustedSubscriptionTrigger } from './subscription-triggers.js';
+import { qident } from './validate.js';
 
 const now = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 const schema = [
@@ -85,17 +86,43 @@ export async function applySubscriptionSchema(db,ddl) {
   const reserved=addition && ['rowid','_rowid_','oid','hub_at'].includes((addition[3]??addition[4]).toLowerCase());
   const addedTable=addition && !reserved && [...watched].find(name=>!name.startsWith('_') && name.toLowerCase()===(addition[1]??addition[2]).toLowerCase());
   if(addedTable) await view.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").bind(addedTable).first();
-  const stable=checkedReads(db);
+  // A column rename follows into the subscriptions selecting it, once each has
+  // acknowledged every event recorded under the old name. Their triggers are
+  // regenerated in the same batch; revision columns never move.
+  const rename=/^\s*ALTER\s+TABLE\s+(?:"([A-Za-z_][A-Za-z0-9_]*)"|([A-Za-z_][A-Za-z0-9_]*))\s+RENAME\s+(?:COLUMN\s+)?(?:"([A-Za-z_][A-Za-z0-9_]*)"|([A-Za-z_][A-Za-z0-9_]*))\s+TO\s+(?:"([A-Za-z_][A-Za-z0-9_]*)"|([A-Za-z_][A-Za-z0-9_]*))\s*;?\s*$/i.exec(ddl);
+  const [from,to]=rename ? [rename[3]??rename[4],rename[5]??rename[6]] : [];
+  const revision=c=>['id','created_at','updated_at','deleted_at','hub_at','rowid','_rowid_','oid'].includes(c.toLowerCase());
+  const renamedTable=rename && !revision(from) && !revision(to)
+    && [...watched].find(name=>!name.startsWith('_') && name.toLowerCase()===(rename[1]??rename[2]).toLowerCase());
+  const follows=[],replaced=new Set();
+  if(renamedTable) {
+    for(const sub of active) {
+      const sources=JSON.parse(sub.trigger_sources_json);
+      const moved=sources.map(s=>s.table===renamedTable ? {...s,columns:s.columns.map(c=>c.toLowerCase()===from.toLowerCase() ? to : c)} : s);
+      if(JSON.stringify(moved)===JSON.stringify(sources)) continue;
+      const state=await view.prepare('SELECT sources_json,pending_delivery_id,acked_seq=last_seq AS drained FROM _change_subscriptions WHERE id=?').bind(sub.id).first();
+      if(state.pending_delivery_id!==null || !state.drained) throw Object.assign(new Error('subscription schema conflict'),{code:'subscription-schema-conflict'});
+      const visible=JSON.parse(state.sources_json).map(s=>s.table===renamedTable ? {...s,columns:s.columns.map(c=>c.toLowerCase()===from.toLowerCase() ? to : c)} : s);
+      for(const trigger of subscriptionTriggers(sub.id,sources)) replaced.add(trigger.name);
+      follows.push({id:sub.id,sources:visible,triggerSources:moved});
+    }
+  }
+  const stable=checkedReads(db),changing=JSON.stringify([...replaced].sort());
   if(names.size) {
-    const {results:objects}=await stable.prepare("SELECT name,type,CASE WHEN type='table' AND name=? THEN NULL ELSE sql END AS sql FROM sqlite_master WHERE name IN (SELECT value FROM json_each(?)) ORDER BY name")
-      .bind(addedTable||'',JSON.stringify([...names].sort())).all();
-    if(objects.length!==names.size || expectedTriggers.some(t=>!objects.some(o=>o.name===t.name && o.type==='trigger' && o.sql===t.sql))) {
+    const {results:objects}=await stable.prepare("SELECT name,type,CASE WHEN type='table' AND name=? THEN NULL ELSE sql END AS sql FROM sqlite_master WHERE name IN (SELECT value FROM json_each(?)) AND name NOT IN (SELECT value FROM json_each(?)) ORDER BY name")
+      .bind(addedTable||renamedTable||'',JSON.stringify([...names].sort()),changing).all();
+    if(objects.length!==names.size-replaced.size || expectedTriggers.some(t=>!replaced.has(t.name) && !objects.some(o=>o.name===t.name && o.type==='trigger' && o.sql===t.sql))) {
       throw Object.assign(new Error('subscription schema conflict'),{code:'subscription-schema-conflict'});
     }
   }
-  if(watched.size) await stable.prepare("SELECT name,tbl_name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name COLLATE NOCASE IN (SELECT value FROM json_each(?)) ORDER BY name").bind(JSON.stringify([...watched].sort())).all();
+  if(watched.size) await stable.prepare("SELECT name,tbl_name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name COLLATE NOCASE IN (SELECT value FROM json_each(?)) AND name NOT IN (SELECT value FROM json_each(?)) ORDER BY name").bind(JSON.stringify([...watched].sort()),changing).all();
+  const following=follows.flatMap(f=>[
+    db.prepare('UPDATE _change_subscriptions SET sources_json=?,trigger_sources_json=? WHERE id=?').bind(JSON.stringify(f.sources),JSON.stringify(f.triggerSources),f.id),
+    ...subscriptionTriggers(f.id,f.triggerSources).map(t=>db.prepare(t.sql)),
+  ]);
   try {
-    await db.batch([...readGuards(db,view.reads),...readGuards(db,stable.reads),db.prepare(ddl),...readGuards(db,stable.reads)]);
+    await db.batch([...readGuards(db,view.reads),...readGuards(db,stable.reads),
+      ...[...replaced].map(name=>db.prepare(`DROP TRIGGER ${qident(name)}`)),db.prepare(ddl),...following,...readGuards(db,stable.reads)]);
   } catch(error) {
     if(String(error).includes('integer overflow')) throw Object.assign(new Error('subscription schema conflict'),{code:'subscription-schema-conflict'});
     throw error;

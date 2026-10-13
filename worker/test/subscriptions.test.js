@@ -202,7 +202,7 @@ test('schema replay cannot silently drop or change watched tables or their recor
   const db=database();db.db.exec('CREATE TABLE _schema_log(id INTEGER PRIMARY KEY,applied_at TEXT,ddl TEXT)');
   const sub=await createSubscription(db,config);
   const {name}=db.db.query("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '%_insert'").get();
-  for(const ddl of ['DROP TABLE articles','ALTER TABLE articles RENAME COLUMN url TO different',`DROP TRIGGER "${name}"`]) {
+  for(const ddl of ['DROP TABLE articles',`DROP TRIGGER "${name}"`]) {
     const response=await ROUTES['/v1/schema/push']({entries:[{applied_at:'2026-10-03T00:00:00.000Z',ddl}]},db);
     expect(response.status).toBe(409);
     expect((await response.json()).error).toBe('subscription_schema_conflict');
@@ -211,6 +211,57 @@ test('schema replay cannot silently drop or change watched tables or their recor
   expect(out.applied).toBe(1);
   await write(db,change('a','https://example.test/a',1));
   expect(rows(db,sub.id)).toHaveLength(1);
+});
+
+const push=async(db,ddl)=>{
+  const out=await ROUTES['/v1/schema/push']({entries:[{applied_at:'2026-10-03T00:00:00.000Z',ddl}]},db);
+  return out instanceof Response ? {status:out.status,...await out.json()} : out;
+};
+const triggerSql=(db,id)=>db.db.query("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE ? ORDER BY name").all(`_change_${id.replaceAll('-','')}_%`);
+
+test.each(['active','paused'])('a renamed watched column follows into drained %s subscriptions; later events carry the new name',async state=>{
+  const {env,call,sub,token,path}=await api(),db=env.DB;
+  db.db.exec('CREATE TABLE _schema_log(id INTEGER PRIMARY KEY,applied_at TEXT,ddl TEXT)');
+  const other=await createSubscription(db,{...config,sources:[{table:'articles',columns:['alternate']}]});
+  const untouched=triggerSql(db,other.id);
+  await write(db,change('a','https://example.test/a',1));
+  const ddl='ALTER TABLE "articles" RENAME COLUMN "url" TO "link"';
+  // An unacknowledged event under the old name blocks the rename.
+  expect(await push(db,ddl)).toMatchObject({status:409,error:'subscription_schema_conflict'});
+  expect(db.db.query('PRAGMA table_info(articles)').all().map(c=>c.name)).toContain('url');
+  const batch=await (await call(path+'/events?wait=0',{token})).json();
+  await call(path+'/ack',{method:'POST',body:{delivery_id:batch.delivery_id},token});
+  db.db.query('UPDATE _change_subscriptions SET state=? WHERE id=?').run(state,sub.id);
+  expect(await push(db,ddl)).toEqual({applied:1});
+  expect(db.db.query('PRAGMA table_info(articles)').all().map(c=>c.name)).toContain('link');
+  const status=await (await call(path,{token})).json();
+  expect(status.sources).toEqual([{table:'articles',columns:['link','alternate']}]);
+  expect(JSON.parse(db.db.query('SELECT trigger_sources_json FROM _change_subscriptions WHERE id=?').get(sub.id).trigger_sources_json)[0].columns).toEqual(['link','alternate']);
+  for(const t of triggerSql(db,sub.id)) expect(await trustedSubscriptionTrigger(db,{...t,tbl_name:'articles'})).toBe(true);
+  expect(triggerSql(db,other.id)).toEqual(untouched);
+  db.db.query("UPDATE _change_subscriptions SET state='active' WHERE id=?").run(sub.id);
+  await write(db,{id:'a',link:'https://example.test/b',updated_at:'2026-10-03T00:00:02.000Z'});
+  expect(rows(db,sub.id).at(-1).changes).toEqual([{column:'link',old_value:'https://example.test/a',new_value:'https://example.test/b'}]);
+});
+
+test('renaming an unselected column of a watched table keeps recording triggers and pending events intact',async()=>{
+  const db=database();db.db.exec('CREATE TABLE _schema_log(id INTEGER PRIMARY KEY,applied_at TEXT,ddl TEXT)');
+  const sub=await createSubscription(db,{...config,sources:[{table:'articles',columns:['url']}]});
+  await write(db,change('a','https://example.test/a',1));
+  const triggers=triggerSql(db,sub.id),pending=rows(db,sub.id);
+  expect(await push(db,'ALTER TABLE articles RENAME COLUMN alternate TO mirror')).toEqual({applied:1});
+  expect(db.db.query('PRAGMA table_info(articles)').all().map(c=>c.name)).toContain('mirror');
+  expect(triggerSql(db,sub.id)).toEqual(triggers);
+  expect(rows(db,sub.id)).toEqual(pending);
+  await write(db,change('a','https://example.test/b',2,{mirror:'https://example.test/m'}));
+  expect(rows(db,sub.id)).toHaveLength(2);
+});
+
+test.each(['id','created_at','updated_at','deleted_at','hub_at'])('a watched table cannot rename its sync column %s',async column=>{
+  const db=database();db.db.exec('CREATE TABLE _schema_log(id INTEGER PRIMARY KEY,applied_at TEXT,ddl TEXT)');
+  await createSubscription(db,config);
+  expect(await push(db,`ALTER TABLE articles RENAME COLUMN ${column} TO renamed`)).toMatchObject({status:409});
+  expect(db.db.query('PRAGMA table_info(articles)').all().map(c=>c.name)).toContain(column);
 });
 
 test.each(['active','paused'])('schema replay adds nullable fields without interrupting watched URL changes (%s)',async state=>{
