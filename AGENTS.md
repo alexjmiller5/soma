@@ -1215,6 +1215,7 @@ consumer reads them, never in this repo.
 | Screentime Dashboard | profile `screentime-dashboard-archive-v1` | Screentime Dashboard ENV `SOMA_HUB_TOKEN` (Worker secret) |
 | Synapse | profile `synapse-workspace-v1` (broad read/write: narrow writes are refused on its capture tables) | `synapse-state` workspace `default`, copy in Synapse ENV `SOMA_HUB_TOKEN` |
 | Reflex | profile `reflex-v2` | Reflex ENV |
+| Agent Dispatch | profile `agent-dispatch-v1` (`subscriptions:consume` on its `tasks.dispatch` subscription, `tables:read:tasks` as subscription consumers require, column reads `id,updated_at,hub_at,dispatch,notes`, patches of `dispatch,notes`), enrolled headless with `soma login --profile ... --start/--claim` | the always-on Mac's login Keychain |
 | Birthdays, Circle, Strava Sync | profiles `birthdays-reader-v1`, `birthdays-editor-v1`, `circle-reader`, `strava-sync-v1` | each app's own storage |
 | Flighty Sync, Page Archiver, Shared Album Reminders, Media Center YouTube offline, Bookmark Mirror, Calendar Feeds, OwnTracks phone, People Sync files | pattern C exact operator tokens (`flighty-sync`, Page Archiver's, `shared-album-reminders-mini-v2`, `media-center-youtube-offline`, `bookmark-mirror-macbook`, `calendar-feeds-*` (minted by its `scripts/provision.py`), `phone`, `people-sync-files`); each moves to a profile at its next rotation | each consumer's native secure storage or settings |
 | soma CLI replicas (one per Mac), Iris (one per device) | browser device enrollment (`soma login`), `full` | device Keychain |
