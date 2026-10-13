@@ -18,6 +18,7 @@ export type ValidateOptions = {
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const LOCAL_TIME_RE = /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d$/;
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const PHONE_RE = /^\+?[0-9 ()\-.]{5,}$/;
 
@@ -26,6 +27,12 @@ export function validEditTimestamp(value: unknown): boolean {
   if (typeof value !== "string" || !DATETIME_RE.test(value) || value.startsWith("0000")) return false;
   const parsed = new Date(value);
   return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
+}
+
+/** A floating local time, `YYYY-MM-DDTHH:MM`: that wall-clock time wherever
+ * the reader is. No seconds, no zone; the date must exist. */
+export function validLocalTime(value: unknown): boolean {
+  return typeof value === "string" && LOCAL_TIME_RE.test(value) && validEditTimestamp(`${value.slice(0, 10)}T00:00:00.000Z`);
 }
 
 export const empty = (v: unknown): boolean =>
@@ -94,7 +101,7 @@ export function validateRow(
     } else if (t === "bool" && ![0, 1, true, false].includes(v as number | boolean)) { fail("type", `${label} must be 0 or 1.`); continue; }
     else if (t === "date" && !(typeof v === "string" && DATE_RE.test(v))) { fail("type", `${label} must be YYYY-MM-DD.`); continue; }
     else if (t === "datetime" && !(typeof v === "string" && DATETIME_RE.test(v))) { fail("type", `${label} must be ISO-8601 UTC with milliseconds.`); continue; }
-    else if (t === "date_or_datetime" && !(typeof v === "string" && (DATE_RE.test(v) || DATETIME_RE.test(v)))) { fail("type", `${label} must be YYYY-MM-DD or ISO-8601 UTC with milliseconds.`); continue; }
+    else if (t === "date_or_datetime" && !(typeof v === "string" && (DATE_RE.test(v) || DATETIME_RE.test(v) || validLocalTime(v)))) { fail("type", `${label} must be YYYY-MM-DD, a YYYY-MM-DDTHH:MM local time or ISO-8601 UTC with milliseconds.`); continue; }
     else if (t === "json") {
       try { typeof v === "string" ? JSON.parse(v) : JSON.stringify(v); } catch { fail("type", `${label} must be JSON.`); continue; }
     } else if (t === "url" && !(typeof v === "string" && /^https?:\/\//.test(v))) { fail("type", `${label} must be an http(s) URL.`); continue; }

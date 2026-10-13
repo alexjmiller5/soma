@@ -12,7 +12,7 @@ import socket
 import sqlite3
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 CATALOG_TABLES = {
@@ -496,8 +496,21 @@ class ValidationError(Exception):
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
+LOCAL_TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 PHONE_RE = re.compile(r"^\+?[0-9 ()\-.]{5,}$")
+
+
+def valid_local_time(v) -> bool:
+    """A floating local time, YYYY-MM-DDTHH:MM: that wall-clock time wherever
+    the reader is. No seconds, no zone; the date must exist."""
+    if not (isinstance(v, str) and LOCAL_TIME_RE.fullmatch(v)):
+        return False
+    try:
+        date.fromisoformat(v[:10])
+    except ValueError:
+        return False
+    return True
 
 
 def _empty(v) -> bool:
@@ -602,9 +615,14 @@ def validate_row(
             fail(col, "type", f"{label} must be ISO-8601 UTC with milliseconds.")
             continue
         elif t == "date_or_datetime" and not (
-            isinstance(v, str) and (DATE_RE.match(v) or DATETIME_RE.match(v))
+            isinstance(v, str) and (DATE_RE.match(v) or DATETIME_RE.match(v) or valid_local_time(v))
         ):
-            fail(col, "type", f"{label} must be YYYY-MM-DD or ISO-8601 UTC with milliseconds.")
+            fail(
+                col,
+                "type",
+                f"{label} must be YYYY-MM-DD, a YYYY-MM-DDTHH:MM local time"
+                " or ISO-8601 UTC with milliseconds.",
+            )
             continue
         elif t == "json":
             try:
