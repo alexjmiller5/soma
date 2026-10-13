@@ -161,3 +161,22 @@ test('a gzip-compressed profile set resolves exactly like its JSON and stays bou
  for(const value of [gzip(huge),'gzip:not-base64!','gzip:'+Buffer.from('plain').toString('base64')])
   expect(await enrollmentProfile({ENROLLMENT_PROFILES:value},'contact-reader-v1')).toBeNull();
 });
+
+test('a profile set past one secret travels as numbered gzip parts that resolve exactly like its JSON',async()=>{
+ const {enrollmentProfile,profileSecrets}=await import('../src/enrollment-profile.js');
+ const big=JSON.stringify({...profiles,...Object.fromEntries(Array.from({length:150},(_,i)=>[`pad-${i}`,{label:`Pad ${i} ${crypto.randomUUID()}`,scopes:[`tables:read:t${crypto.randomUUID().replaceAll('-','')}`]}]))});
+ const secrets=profileSecrets(big);
+ expect(Object.keys(secrets).length).toBeGreaterThan(1);
+ for(const value of Object.values(secrets)) expect(value.length).toBeLessThan(5000);
+ const plain=await enrollmentProfile({ENROLLMENT_PROFILES:big},'contact-reader-v1');
+ expect(plain).not.toBeNull();
+ expect(await enrollmentProfile(secrets,'contact-reader-v1')).toEqual(plain);
+ // Parts left over from a larger earlier set are never read.
+ expect(await enrollmentProfile({...secrets,ENROLLMENT_PROFILES_9:'stale'},'contact-reader-v1')).toEqual(plain);
+ // A set that fits one secret keeps the single-part form a running older hub reads.
+ const small=profileSecrets(JSON.stringify(profiles));
+ expect(small).toEqual({ENROLLMENT_PROFILES:'gzip:'+Buffer.from(Bun.gzipSync(JSON.stringify(profiles))).toString('base64')});
+ expect(await enrollmentProfile({...small,ENROLLMENT_PROFILES_2:'stale'},'contact-reader-v1')).toEqual(plain);
+ const {ENROLLMENT_PROFILES_2:_,...missing}=secrets;
+ expect(await enrollmentProfile(missing,'contact-reader-v1')).toBeNull();
+});

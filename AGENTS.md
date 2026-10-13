@@ -824,8 +824,11 @@ The deploy workflow pushes `ENROLLMENT_PROFILES`, `ROW_CREATION_POLICIES` and
 `CAPTURE_ADAPTERS` (JSON, `{}` when unused) from the project's ENV item, and
 `DERIVATIONS` from the "Soma Hub Derivations Config" item, on every deploy; edit
 the item and redeploy, never `wrangler secret put` by hand. One Worker secret is
-capped at 5.1 kB, so the deploy step sends `ENROLLMENT_PROFILES` as
-`gzip:<base64>`; the Worker accepts either form and bounds decompression.
+capped at 5.1 kB, so the deploy step sends `ENROLLMENT_PROFILES` through
+`profileSecrets` (`worker/src/enrollment-profile.js`): `gzip:<base64>` when it
+fits one secret, else `gzip:<count>:<part 1>` plus `ENROLLMENT_PROFILES_<n>`
+parts (the count makes leftover parts inert); the Worker accepts plain JSON or
+either form and bounds decompression.
 Requested unknown profiles never fall back to full. Auth storage binds
 the approved profile revision and scopes to the fingerprint atomically. Profile
 tokens get no governance authority. Core owns the optional profile expectation
