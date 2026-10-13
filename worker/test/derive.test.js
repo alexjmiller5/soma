@@ -801,6 +801,33 @@ async function tracks(outputs) {
 }
 const counted = (fetchImpl) => { const calls = []; return { calls, fetchImpl: async (url, init) => { calls.push(JSON.parse(init.body).id); return fetchImpl(url, init); } }; };
 
+test("nine derived outputs on a wide table fit D1's expression depth, including native REALs and no-data proofs", async () => {
+  const { LimitedD1 } = await import("./limited-d1.js");
+  const db = new LimitedD1({ realNumbers: true });
+  try {
+    await seed(db);
+    for (let i = 0; i < 32; i++) await db.prepare(`ALTER TABLE movies ADD COLUMN extra${i} TEXT`).run();
+    for (let i = 0; i < 7; i++) {
+      await db.prepare(`ALTER TABLE movies ADD COLUMN output${i} ${i === 0 ? "REAL" : "TEXT"}`).run();
+      await db.prepare(`INSERT INTO catalog_properties (id,tbl,col,sort,type,derived_by,inputs)
+        VALUES (?,?,?,?,?,'http:tmdb_movie','["id"]')`)
+        .bind(`movies.output${i}`, "movies", `output${i}`, i + 10, i === 0 ? "number" : "text").run();
+    }
+    const values = { title: "Blade Runner", genres: ["Drama"], output0: 1.23,
+      output1: "one", output2: "two", output3: "three", output4: "four", output5: "five", output6: "six" };
+    expect(await deriveRows(db, ENV, "movies", ["78"], { fetchImpl: stub({ body: values }).fetchImpl }))
+      .toEqual({ derived: 1, failed: [] });
+    expect(await db.prepare("SELECT title,output0,output6 FROM movies WHERE id='78'").first())
+      .toEqual({ title: "Blade Runner", output0: 1.23, output6: "six" });
+    expect(await db.prepare("SELECT count(*) AS n FROM provenance WHERE to_ref='78'").first()).toEqual({ n: 9 });
+    await db.prepare("INSERT INTO movies (id,status,updated_at) VALUES ('79','Not Started','2026-01-01T00:00:00.000Z')").run();
+    expect(await deriveRows(db, ENV, "movies", ["79"], { fetchImpl: stub({ body: {} }).fetchImpl }))
+      .toEqual({ derived: 1, failed: [] });
+    expect(await db.prepare("SELECT count(*) AS n FROM provenance WHERE to_ref='79' AND detail=?").bind('{"no_data":true}').first())
+      .toEqual({ n: 9 });
+  } finally { await db.close(); }
+});
+
 test("freshness checks over many fresh proofs leave budget for the source calls", async () => {
   const { db, cols, ids, env, fetchImpl } = await tracks(12);
   // every output proven but the last: a per-cell scan reads 23 statements a row

@@ -851,10 +851,11 @@ table with safe defaults and no generated expressions, arbitrary triggers,
 derivations (except as below), ineligible enforced SQL rules or physical foreign keys. An enforced
 table invariant is eligible when it matches one of the three anchored templates
 in `scopes.js` (row pattern rejection, conditional JSON-tag membership,
-same-table uniqueness), or when `confinedInvariant` finds that its SQL names no
-other table, view or schema object in any quoting and has no `;` or comment.
-It then runs unchanged in the checked transaction, so a rejection reveals
-nothing outside the grant; a rule that fails to compile fails the request
+same-table uniqueness), or when `publicInvariant` finds that its SQL reads only
+ordinary base tables, with no view, private/schema object, `;` or comment in any
+quoting. Cross-table rules run hub-side without granting the writer those rows.
+They run unchanged in the checked transaction; narrow responses expose only a
+generic rejection. A rule that fails to compile fails the request
 closed. `provenance:create:<table>` (with `tables:write:<table>`) admits
 insert-only `imported_from`/`evidence_of` edges onto live rows of that table
 through `/v1/rows/insert` (`authorizeEdges`, then `edgePolicy` over

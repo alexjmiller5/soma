@@ -143,11 +143,12 @@ A `tables:write:<table>` holder writes through `/v1/rows/insert` and
 `/v1/rows/push` with the same validation as a full writer, once the table passes
 the scoped eligibility checks (AGENTS.md, Hub service). An enforced invariant of
 that table is eligible when it matches one of the anchored templates in
-`worker/src/scopes.js`, or when its SQL names no other table or view, no
-`sqlite_*`/`pragma_*` object and no `dbstat`, in any quoting, and contains no `;`
-or comment. A single-quoted literal equal to another table's name counts as
-naming it, because SQLite reads such a literal as a table name where one is
-expected. Eligible rules run unchanged inside the write transaction. A rule that
+`worker/src/scopes.js`, or when its SQL reads only ordinary base tables, no view,
+private state, `sqlite_*`/`pragma_*` object or `dbstat`, in any quoting, and
+contains no `;` or comment. Cross-table rules evaluate on the hub without
+granting the writer access to those rows. A single-quoted literal naming an
+ineligible object is also refused because SQLite accepts it as a table name.
+Eligible rules run unchanged inside the write transaction. A rule that
 fails to compile fails the request closed (400, nothing written). Rejections
 stay generic.
 

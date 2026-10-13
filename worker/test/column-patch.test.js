@@ -32,6 +32,22 @@ async function setup(grants=scopes,data=db()){
 }
 const patch=(values={enabled:1},extra={})=>({table:'contacts',id:'a',values,expected_revision:{updated_at:time,hub_at:null},...extra});
 
+test('narrow patches enforce public cross-table rules without exposing their data',async()=>{
+ const {call,data}=await setup();
+ data.db.exec(`CREATE TABLE photos(id TEXT PRIMARY KEY,owner_id TEXT,detail TEXT);
+ INSERT INTO photos VALUES ('private-photo','a','private-detail');
+ INSERT INTO catalog_rules VALUES ('photo-owner','contacts','invariant',1,'table',
+ 'SELECT c.id FROM changed c WHERE c.deleted_at IS NULL AND c.enabled=1 AND NOT EXISTS (SELECT 1 FROM photos p WHERE p.owner_id=c.id)',NULL);`);
+ expect((await call('/v1/rows/patch',patch())).status).toBe(200);
+ const revision=data.db.query('SELECT updated_at,hub_at FROM contacts').get();
+ data.db.exec("UPDATE photos SET owner_id='other'; UPDATE contacts SET enabled=0");
+ const rejected=await call('/v1/rows/patch',patch({enabled:1},{expected_revision:revision}));
+ expect(rejected.status).toBe(422);
+ expect(await rejected.json()).toEqual({error:'validation_failed'});
+ expect(data.db.query('SELECT enabled FROM contacts').get().enabled).toBe(0);
+ expect((await call('/v1/rows/pull',{table:'photos',columns:['id','detail']})).status).toBe(403);
+});
+
 test('column patch changes only the granted field and returns a guarded revision',async()=>{
  const {call,data}=await setup();const r=await call('/v1/rows/patch',patch());expect(r.status).toBe(200);
  const receipt=await r.json();expect(receipt.id).toBe('a');expect(Object.keys(receipt).sort()).toEqual(['id','revision']);
@@ -74,12 +90,12 @@ test('live-row patch preserves an incoming-reference deletion invariant',async()
  expect((await call('/v1/rows/patch',patch({deleted_at:time}))).status).toBe(403);
 });
 
-test('a lookalike deletion rule with an extra condition cannot leak ungranted data',async()=>{
+test('a public cross-table rule with an extra condition rejects without leaking data',async()=>{
  const {call,data}=await setup();
  data.db.exec(`CREATE TABLE mentions(id TEXT PRIMARY KEY,contact_ids TEXT,deleted_at TEXT);
  INSERT INTO catalog_rules VALUES ('incoming','contacts','invariant',1,'table',
  'SELECT p.id FROM changed p WHERE p.deleted_at IS NOT NULL AND EXISTS (SELECT 1 FROM mentions q, json_each(q.contact_ids) j WHERE q.deleted_at IS NULL AND j.value = p.id) OR p.enabled=1',NULL);`);
- expect((await call('/v1/rows/patch',patch())).status).toBe(403);
+ expect((await call('/v1/rows/patch',patch())).status).toBe(422);
  expect(data.db.query('SELECT enabled FROM contacts').get().enabled).toBe(0);
 });
 
@@ -91,7 +107,7 @@ test('live-row patch preserves a single-reference deletion invariant',async()=>{
  'SELECT p.id FROM changed p WHERE p.deleted_at IS NOT NULL AND EXISTS (SELECT 1 FROM quotes q WHERE q.deleted_at IS NULL AND q.contact_id = p.id)',NULL);`);
  expect((await call('/v1/rows/patch',patch())).status).toBe(200);
  data.db.exec(`UPDATE catalog_rules SET sql=sql||' OR p.enabled=0'`);
- expect((await call('/v1/rows/patch',patch({enabled:0},{expected_revision:data.db.query('SELECT updated_at,hub_at FROM contacts').get()}))).status).toBe(403);
+ expect((await call('/v1/rows/patch',patch({enabled:0},{expected_revision:data.db.query('SELECT updated_at,hub_at FROM contacts').get()}))).status).toBe(422);
 });
 
 test('live-row patch preserves a deletion invariant grouping several tables in one parenthesized term',async()=>{
@@ -103,14 +119,15 @@ test('live-row patch preserves a deletion invariant grouping several tables in o
  'SELECT p.id FROM changed p WHERE p.deleted_at IS NOT NULL AND (EXISTS (SELECT 1 FROM quotes q WHERE q.deleted_at IS NULL AND q.note != '')'' AND q.contact_id = p.id) OR EXISTS (SELECT 1 FROM mentions r, json_each(coalesce(r.contact_ids,''[]'')) j WHERE r.deleted_at IS NULL AND j.value = p.id))',NULL);`);
  expect((await call('/v1/rows/patch',patch())).status).toBe(200);
  const revision=()=>({expected_revision:data.db.query('SELECT updated_at,hub_at FROM contacts').get()});
- // A term after the group, or a group closing before the end, is not a deletion guard.
+ // Public rules evaluate normally even when they are not deletion-only guards.
  const guard=data.db.query('SELECT sql FROM catalog_rules').get().sql;
- // A comment hiding a parenthesis is not a deletion guard either.
- for(const sql of [guard+' OR p.enabled=1',guard.replace('AND (EXISTS','AND (1) OR (EXISTS'),guard.replace(/p\.id\)\)$/,'p.id) /* ( */) OR p.enabled=1 --)')]){
+ for(const sql of [guard+' OR p.enabled=1',guard.replace('AND (EXISTS','AND (1) OR (EXISTS')]){
   data.db.query('UPDATE catalog_rules SET sql=?').run(sql);
-  expect((await call('/v1/rows/patch',patch({enabled:0},revision()))).status).toBe(403);
+  expect((await call('/v1/rows/patch',patch({enabled:0},revision()))).status).toBe(sql===guard+' OR p.enabled=1'?200:422);
  }
- expect(data.db.query('SELECT enabled FROM contacts').get().enabled).toBe(1);
+ data.db.query('UPDATE catalog_rules SET sql=?').run(guard.replace(/p\.id\)\)$/,'p.id) /* ( */) OR p.enabled=1 --)'));
+ expect((await call('/v1/rows/patch',patch({enabled:1},revision()))).status).toBe(403);
+ expect(data.db.query('SELECT enabled FROM contacts').get().enabled).toBe(0);
 });
 
 test('derived tables accept patches that touch neither derived values nor their inputs',async()=>{

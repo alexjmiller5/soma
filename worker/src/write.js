@@ -21,6 +21,13 @@ function unionAll(terms) {
   return terms.join(' UNION ALL ');
 }
 
+// Keep wide-row approvals below D1's expression-depth limit.
+function conjunction(terms) {
+  if (terms.length < 2) return terms[0] ?? '1';
+  const middle = terms.length >> 1;
+  return `(${conjunction(terms.slice(0, middle))} AND ${conjunction(terms.slice(middle))})`;
+}
+
 // Keep each JSON value well below D1's length limit, including UTF-8 and JSON
 // escaping. A single oversized row must use native cells instead.
 function jsonChunks(rows) {
@@ -232,7 +239,7 @@ export async function prepareChecked(db, table, rules, statements, now, history 
         ${rule.sql});`;
     }).join('\n');
     if (expected.length) {
-      const matches = cols.map(c=>{
+      const matches = conjunction(cols.map(c=>{
         const path=literal('$.row."'+c+'"'),actual=`NEW.${qident(c)} COLLATE BINARY`,value=`json_extract(a.value,${path})`;
         // Trigger NEW operands do not inherit a table column's comparison
         // affinity. Match lossless INTEGER decimal text explicitly.
@@ -243,7 +250,7 @@ export async function prepareChecked(db, table, rules, statements, now, history 
         return `(json_type(a.value,${path}) IS NULL OR CASE WHEN json_type(a.value,${path})='object'
           THEN EXISTS (SELECT 1 FROM ${qident(numbers)} n WHERE n.id=json_extract(${value},'$.native') AND (${actual} IS n.value${nativeInteger}))
           ELSE (${actual} IS ${value}${integer}) END)`;
-      }).join(' AND ');
+      }));
       if (!finalState) triggerChecks += dependencyChecks(props, event, approval);
       triggerChecks += ` SELECT RAISE(ABORT, 'life_write_conflict') WHERE NOT EXISTS (SELECT 1 FROM ${qident(approval)} a WHERE ${matches});`;
     }

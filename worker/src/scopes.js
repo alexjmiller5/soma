@@ -22,6 +22,7 @@ export function sessionCapabilities(scopes) {
 }
 
 import { qident } from './validate.js';
+import { assertPublicSql } from './governance-isolation.js';
 import { trustedSubscriptionTrigger } from './subscription-triggers.js';
 import { checkedReads, readGuards } from './write.js';
 import { trustedContinuityTrigger } from './governance-continuity.js';
@@ -132,11 +133,10 @@ function scopedInvariant(rule, table, columns, liveRows) {
   return !!match && match[1] === table && names.has(match[2]);
 }
 
-// Any other enforced invariant of the table runs exactly as for full writers
-// when its SQL can read nothing else, so a rejection reveals nothing outside
-// the grant: no other table or view may be named in any quoting (SQLite also
-// takes a single-quoted string as a table name, so a literal equal to one
-// fails closed), and no ';' or comment may hide part of the statement.
+// Operator-owned invariants may read ordinary base tables on the hub without
+// granting their data to a narrow writer. Rejections stay generic. Views,
+// private state and schema introspection remain ineligible, including quoted
+// names, and no ';' or comment may hide part of the statement.
 // ponytail: word screen, not a parser; a rule naming a column that shares a
 // name with another table stays ineligible.
 const schemaWord = /^(?:sqlite_|pragma_)|^dbstat$/i;
@@ -161,13 +161,14 @@ function sqlWords(sql) {
   }
   return words;
 }
-async function confinedInvariant(view, rule, table) {
+async function publicInvariant(view, rule, table) {
   if (rule.scope !== 'table' || rule.tbl !== table || rule.enforce !== 1 || !supportedRuleSql(rule.sql)) return false;
   const words=sqlWords(rule.sql);
   if (!words) return false;
-  const {results}=await view.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','view')").all();
-  const others=new Set(results.map(r=>r.name.toLowerCase()).filter(name=>name!==table.toLowerCase()));
-  return !words.some(w=>schemaWord.test(w) || others.has(w.toLowerCase()));
+  const {results}=await view.prepare("SELECT name,type FROM sqlite_master WHERE type IN ('table','view')").all();
+  const forbidden=new Set(results.filter(r=>r.name.toLowerCase()!==table.toLowerCase()
+    && (r.type!=='table' || !ordinaryName(r.name))).map(r=>r.name.toLowerCase()));
+  return !words.some(w=>schemaWord.test(w) || forbidden.has(w.toLowerCase()));
 }
 
 // provenance:create:<table>, beside tables:write:<table>, inserts origin edges
@@ -303,8 +304,11 @@ async function inspectTable(view, table, write, rowIds, origin, livePatch=false,
     // Inserted rows are live when deleted_at is neither listed nor defaulted.
     const liveRows=livePatch || (Array.isArray(inserted) && !inserted.includes('deleted_at')
       && columns.some(c=>c.name==='deleted_at' && c.dflt_value==null));
-    for (const rule of rules) if (!(changeset && rule.tbl===table && rule.scope==='table' && supportedRuleSql(rule.sql)) && !scopedInvariant(rule,table,columns,liveRows)
-      && !(origin ? await originInvariant(view,rule) : await confinedInvariant(view,rule,table))) deny();
+    for (const rule of rules) {
+      assertPublicSql(rule.sql);
+      if (!(changeset && rule.tbl===table && rule.scope==='table' && supportedRuleSql(rule.sql)) && !scopedInvariant(rule,table,columns,liveRows)
+        && !(origin ? await originInvariant(view,rule) : await publicInvariant(view,rule,table))) deny();
+    }
   }
   return columns;
 }

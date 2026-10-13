@@ -101,7 +101,7 @@ for(const [name,sql] of [
   ['SQL options',"UPDATE catalog_properties SET options_sql='SELECT value FROM secrets' WHERE tbl='articles'"],
   ['SQL catalog default',"UPDATE catalog_properties SET default_value='sql:SELECT value FROM secrets' WHERE tbl='articles'"],
   ['derived property',"UPDATE catalog_properties SET derived_by='http:fixture' WHERE tbl='articles'"],
-  ['invariant',"INSERT INTO catalog_rules VALUES ('rule-secret','articles','invariant',1,'table','SELECT value FROM secrets',NULL)"],
+  ['private invariant',"INSERT INTO catalog_rules VALUES ('rule-secret','articles','invariant',1,'table','SELECT id FROM catalog_properties',NULL)"],
   ['foreign key side effect',"CREATE TABLE child(id TEXT PRIMARY KEY,parent TEXT REFERENCES articles(id) ON DELETE CASCADE)"],
 ]) test(`narrow writes reject ${name} without leaking policy details`,async()=>{
   const db=rowDb();db.db.exec(sql);
@@ -347,24 +347,36 @@ for(const sql of [
 });
 
 const join = target => `SELECT c.id FROM changed c JOIN ${target} s ON s.id = c.id WHERE c.deleted_at IS NULL`;
+for(const route of ['insert','push']) test(`public cross-table invariants enforce narrow ${route} without broad reads`,async()=>{
+  const db=captureDb();
+  rule(db,"SELECT c.id FROM changed c WHERE c.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM secrets s WHERE s.id=c.description)");
+  const {call}=await setup(['tables:write:articles'],db);
+  const accepted=await call(`/v1/rows/${route}`,'POST',capture({description:'s'}));
+  expect(accepted.status).toBe(200);
+  expect((await accepted.json()).rejected).toEqual([]);
+  const rejected=await call(`/v1/rows/${route}`,'POST',capture({id:'c',description:'absent'}));
+  expect(rejected.status).toBe(200);
+  expect((await rejected.json()).rejected).toEqual([{id:'c',col:null,rule:'validation',message:'Row rejected.'}]);
+  expect(db.db.query("SELECT id FROM articles WHERE id='c'").get()).toBeNull();
+  expect((await call('/v1/rows/pull','POST',pull('secrets'))).status).toBe(403);
+});
 for(const [sql,setupSql] of [
-  [templates[2].replace('JOIN articles','JOIN secrets')],
-  [templates[0]+' UNION SELECT id FROM secrets'],
-  ['SELECT id FROM secrets'],
-  ...['"secrets"','[secrets]','`secrets`',"'secrets'",'main.secrets','SECRETS','"Secrets"','main."secrets"'].map(t=>[join(t)]),
+  ...['"catalog_properties"','[catalog_properties]','`catalog_properties`',"'catalog_properties'",'main.catalog_properties','CATALOG_PROPERTIES','main."catalog_properties"'].map(t=>[join(t)]),
   [join('shadow'),'CREATE VIEW shadow AS SELECT id,value FROM secrets'],
+  [join('_governance_proposals')],
+  ["SELECT c.id FROM changed c WHERE c.deleted_at IS NOT NULL AND EXISTS (SELECT 1 FROM _governance_proposals)"],
   ["SELECT id FROM changed WHERE EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'x')"],
   ['SELECT id FROM changed WHERE EXISTS (SELECT 1 FROM sqlite_schema)'],
   ['SELECT id FROM changed WHERE (SELECT count(*) FROM pragma_table_list) > 9'],
   ['SELECT id FROM changed WHERE (SELECT count(*) FROM dbstat) > 9'],
   // A single-quoted name is an identifier where SQLite expects a table, so a
   // literal equal to another table's name is denied too (fail closed).
-  ["SELECT id FROM changed WHERE deleted_at IS NULL AND description = 'secrets'"],
+  ["SELECT id FROM changed WHERE deleted_at IS NULL AND description = 'catalog_properties'"],
   ...[';',' -- comment',' /* comment */'].map(s=>[templates[0]+s]),
   [templates[0].replace("'%.'","'bad\\' OR 1=1 --'")],
   ["SELECT id FROM changed WHERE description = 'open"],
   ['DELETE FROM articles RETURNING id'],
-]) test(`invariant reading outside the granted table denied: ${sql}`,async()=>{
+]) test(`invariant reading private state or unsupported SQL denied: ${sql}`,async()=>{
   const db=captureDb();if(setupSql)db.db.exec(setupSql);rule(db,sql);
   const {call}=await setup(['tables:write:articles'],db);
   const response=await call('/v1/rows/insert','POST',capture());
@@ -607,9 +619,13 @@ test('narrow inserts of live rows keep a deletion invariant that reads another t
   expect(created.status).toBe(200);
   // The existing tombstone is reported unchanged; the guard never evaluates it.
   expect(await created.json()).toEqual({inserted:['b'],existing:['s'],rejected:[]});
-  // A write that can tombstone a row would evaluate the guard, so it is denied.
-  expect((await call('/v1/rows/insert','POST',insert({columns:['id','url','updated_at','deleted_at'],rows:[{id:'c',url:'u',updated_at:revision,deleted_at:null}]}))).status).toBe(403);
-  expect((await call('/v1/rows/push','POST',insert())).status).toBe(403);
+  // Lifecycle-capable writes evaluate the public rule rather than denying scope.
+  const tombstone=await call('/v1/rows/push','POST',insert({columns:['id','url','updated_at','deleted_at'],rows:[{id:'s',url:'https://example.test/s',updated_at:'2026-10-04T00:00:00.000Z',deleted_at:revision}]}));
+  expect(tombstone.status).toBe(200);
+  expect((await tombstone.json()).rejected).toEqual([{id:'s',col:null,rule:'validation',message:'Row rejected.'}]);
+  expect((await call('/v1/rows/push','POST',insert())).status).toBe(200);
   db.db.exec("ALTER TABLE articles RENAME TO old_articles; CREATE TABLE articles(id TEXT PRIMARY KEY,url TEXT,updated_at TEXT,deleted_at TEXT DEFAULT 'x',hub_at TEXT)");
-  expect((await call('/v1/rows/insert','POST',insert({rows:[{id:'e',url:'u',updated_at:revision}]}))).status).toBe(403);
+  const invalid=await call('/v1/rows/insert','POST',insert({rows:[{id:'e',url:'u',updated_at:revision}]}));
+  expect(invalid.status).toBe(200);
+  expect(await invalid.json()).toEqual({inserted:['e'],existing:[],rejected:[]});
 });
