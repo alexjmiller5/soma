@@ -143,3 +143,25 @@ test('failed outer commit does not publish an action undo receipt',async()=>{
   db.transaction=transaction;
   expect(await h.undoStatus({})).toEqual({action:null});expect(await item(db)).toMatchObject({state:'Open'});
 });
+
+test('action layout widths survive save and reload and reject invalid values', async () => {
+  const {db, view, definition} = await fixture();
+  const saved = await core.saveView(db, {table:'items', id:view.id, name:view.name,
+    expectedUpdatedAt:view.updated_at!, definition:{...definition,
+      layout:[{kind:'action',id:'close',width:312},{kind:'column',id:'state'}]}});
+  expect((await core.listViews(db,{table:'items'})).views[0].definition?.layout?.[0]).toEqual({kind:'action',id:'close',width:312});
+  for (const width of [0,-1,NaN,Infinity,'312',null]) {
+    await expect(core.saveView(db,{table:'items',id:view.id,name:view.name,
+      expectedUpdatedAt:saved.updated_at!,definition:{...definition,
+        layout:[{kind:'action',id:'close',width},{kind:'column',id:'state'}]}} as unknown as core.SaveViewArgs)).rejects.toThrow();
+  }
+});
+
+test('hidden catalog columns retain their layout position without changing the projection', async () => {
+  const {db,view,definition} = await fixture();
+  const saved = await core.saveView(db,{table:'items',id:view.id,name:view.name,
+    expectedUpdatedAt:view.updated_at!,definition:{...definition,
+      layout:[{kind:'column',id:'qty'},{kind:'column',id:'state'},{kind:'action',id:'close'}]}});
+  expect(saved.definition?.columns).toEqual(['state']);
+  expect(saved.definition?.layout?.[0]).toEqual({kind:'column',id:'qty'});
+});

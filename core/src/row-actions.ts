@@ -35,9 +35,10 @@ export function validateRowActions(value: Row, catalog: Catalog, table: string):
   if (layout!==undefined) {
     if (!Array.isArray(layout) || !layout.length || layout.length>128) throw new Error('Invalid saved layout.');
     const seen=new Set<string>();
-    const columns=new Set(Array.isArray(value.columns)?value.columns:[...byColumn.keys(),'id','created_at','updated_at','deleted_at']);
+    const columns=new Set([...byColumn.keys(),'id','created_at','updated_at','deleted_at']);
     for(const item of layout) {
-      object(item,['kind','id']);
+      object(item,['kind','id','width']);
+      if (item.width!==undefined && (item.kind!=='action' || typeof item.width!=='number' || !Number.isFinite(item.width) || item.width<=0)) throw new Error('Invalid saved action column width.');
       if (typeof item.id!=='string' || !['column','action'].includes(String(item.kind))
         || seen.has(`${item.kind}:${item.id}`) || !(item.kind==='action'?ids:columns).has(item.id)) throw new Error('Unknown or repeated saved layout reference.');
       seen.add(`${item.kind}:${item.id}`);

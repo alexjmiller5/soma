@@ -2288,6 +2288,10 @@
         },
         "id": {
           "type": "string"
+        },
+        "width": {
+          "type": "number",
+          "description": "Finite positive persistent width for an action column. Property column widths use the saved view widths map."
         }
       },
       "required": [

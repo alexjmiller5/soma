@@ -30,6 +30,9 @@ text (absent: none wrap); like `widths` it is presentation only and never reache
 query view, and a wrapped column missing from the catalog or schema makes the view
 unavailable.
 
+Action layout items may carry a finite positive `width`; property widths remain in
+the saved view `widths` map. Both persist through view writes and are presentation only.
+
 Per-table preferred-view IDs use the canonical `view-defaults/v1` manifest and
 `getViewDefault`/`setViewDefault` operations. Writes require the displayed revision
 and use normal validation/history/Undo; unavailable pointers fall back visibly
