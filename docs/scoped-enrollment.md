@@ -123,10 +123,12 @@ uncertain, not evidence of failure. Read the current row before another edit.
 
 These grants never authorize push, insert, lifecycle edits, caller history,
 schema, replica synchronization or governance. Catalog invariants remain
-enforced. The checked patch path additionally recognizes the exact incoming
-single- and multi-reference deletion guard templates, whose deletion predicate
-cannot hold for a live-row patch; arbitrary SQL and lookalike suffixes are still
-denied. A table with hub derivations accepts a patch that writes neither a
+enforced. The checked patch path additionally admits a deletion guard,
+`SELECT a.id FROM changed a WHERE a.deleted_at IS NOT NULL AND <term>` whose
+single `EXISTS (...)` or parenthesized term ends the statement: its deletion
+predicate cannot hold for a live-row patch, whatever the term reads. A term
+followed by anything else, or a group that closes early, is still denied.
+A table with hub derivations accepts a patch that writes neither a
 derived column nor any of its declared inputs; no derivation runs for it.
 Browser approval lists every grant and labels any profile holding a write,
 patch, creation, file-write, stream-append or capture-submit grant as read and
@@ -148,6 +150,13 @@ naming it, because SQLite reads such a literal as a table name where one is
 expected. Eligible rules run unchanged inside the write transaction. A rule that
 fails to compile fails the request closed (400, nothing written). Rejections
 stay generic.
+
+`/v1/rows/insert` never changes an existing row, so it also admits a table with
+hub derivations when the request's `columns` list no derived column: the hub
+derives the new rows in the background exactly as after a full writer's insert.
+An insert whose `columns` omit `deleted_at` (a column without a default)
+creates only live rows, so it admits the same deletion guards as a live-row
+patch. Push admits neither.
 
 `provenance:create:<table>` adds `POST /v1/rows/insert` with
 `table: "provenance"`. Every row carries nonempty string `id`, `from_kind`,
@@ -177,10 +186,13 @@ sessions. `soma-core/consumer-config` exports canonical pure configuration check
 
 `POST /v1/catalog/projection` takes `{table,columns}` (1-256 distinct columns).
 Every column needs both `catalog:read` and `tables:read` grants, even for an
-operator calling this narrow endpoint. The reply is `{table,properties}` with
-column, type, description, required, readOnly and optional static options.
-Only option values, descriptions and sort ranks are exposed; dynamic SQL,
-reference targets, defaults and private metadata are never disclosed or run.
+operator calling this narrow endpoint. The reply is `{table,properties,rules}`:
+each property has column, type, description, required, readOnly, optional static
+options and an optional `default`, the catalog's static default text (a `sql:`
+default is omitted). `rules` lists the human `text` of the table's enforced
+invariants, by rule id, never their SQL. Only option values, descriptions, sort
+ranks and palette colors are exposed; dynamic SQL, reference targets, SQL
+defaults and private metadata are never disclosed or run.
 Read-only includes identity/revision fields, derived/immutable/dynamic-option
 properties and columns without a patch grant. Uncataloged engine columns
 (`id` text; `created_at`, `updated_at`, `hub_at`, `deleted_at` datetime) project

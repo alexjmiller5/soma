@@ -32,7 +32,7 @@ import { backup } from "./backup.js";
 import { backupsAllowed, handleBackups } from "./backups.js";
 import { handleLogin, loginPath } from "./login.js";
 import { applySubscriptionSchema, handleSubscription } from "./subscriptions.js";
-import { hasSchemaAccess, scopedReplicaUnsupported, sessionCapabilities, broadTableAccess, authorizeTable, authorizeRead, authorizeRowPatch, authorizeEdges, edgePolicy, scopedPatchTable, scopedTable, scopedQuery, prefetchTables, scopedRows, scopedOptions, scopedResult, ScopeDenied } from "./scopes.js";
+import { hasSchemaAccess, scopedReplicaUnsupported, sessionCapabilities, broadTableAccess, authorizeTable, authorizeRead, authorizeRowPatch, authorizeEdges, edgePolicy, scopedPatchTable, scopedInsertTable, scopedTable, scopedQuery, prefetchTables, scopedRows, scopedOptions, scopedResult, ScopeDenied } from "./scopes.js";
 
 // Must match the trigger in wrangler.jsonc.
 const SWEEP_CRON = "*/15 * * * *";
@@ -663,7 +663,8 @@ const ROUTES = {
     const rows = body.rows.map(row=>Object.fromEntries(columns.filter(col=>Object.hasOwn(row,col)).map(col=>[col,row[col]])));
     const stamping = await hasHubAt(db,table);
     const out = await pushChecked(db,table,rows,(t,c,s)=>upsertSql(t,c,s,true),stamping,[],true,policy);
-    if (!policy && out.accepted.length && ctx && env) ctx.waitUntil(logDerive(deriveStale(queryBudget(db,200),env,table,out.accepted)));
+    // A narrow insert leaves derived columns unwritten; the hub fills them as for any insert.
+    if (table !== "provenance" && out.accepted.length && ctx && env) ctx.waitUntil(logDerive(deriveStale(queryBudget(db,200),env,table,out.accepted)));
     return {inserted:out.accepted.map(row=>row.id),existing:out.existing ?? [],rejected:out.rejected};
   },
 
@@ -1132,7 +1133,8 @@ async function handle(request, env, ctx, url) {
         return json({error:"insufficient scope"},403);
       }
       // Only authorizeEdges admits provenance here (never an ordinary table grant).
-      const policy = body.table === 'provenance' ? edgePolicy(body.rows) : scopedTable;
+      const policy = body.table === 'provenance' ? edgePolicy(body.rows)
+        : url.pathname === '/v1/rows/insert' ? scopedInsertTable(body.columns) : scopedTable;
       await policy(tenant.db,body.table,true,body.rows.map(row=>row?.id));
       const out = await ROUTES[url.pathname](body,tenant.db,env,ctx,policy);
       return out instanceof Response ? out : json(scopedResult(out));

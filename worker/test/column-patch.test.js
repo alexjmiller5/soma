@@ -94,6 +94,25 @@ test('live-row patch preserves a single-reference deletion invariant',async()=>{
  expect((await call('/v1/rows/patch',patch({enabled:0},{expected_revision:data.db.query('SELECT updated_at,hub_at FROM contacts').get()}))).status).toBe(403);
 });
 
+test('live-row patch preserves a deletion invariant grouping several tables in one parenthesized term',async()=>{
+ const {call,data}=await setup();
+ data.db.exec(`CREATE TABLE quotes(id TEXT PRIMARY KEY,contact_id TEXT,note TEXT,deleted_at TEXT);
+ CREATE TABLE mentions(id TEXT PRIMARY KEY,contact_ids TEXT,deleted_at TEXT);
+ INSERT INTO quotes VALUES ('q','a',')',NULL);INSERT INTO mentions VALUES ('m','["a"]',NULL);
+ INSERT INTO catalog_rules VALUES ('incoming','contacts','invariant',1,'table',
+ 'SELECT p.id FROM changed p WHERE p.deleted_at IS NOT NULL AND (EXISTS (SELECT 1 FROM quotes q WHERE q.deleted_at IS NULL AND q.note != '')'' AND q.contact_id = p.id) OR EXISTS (SELECT 1 FROM mentions r, json_each(coalesce(r.contact_ids,''[]'')) j WHERE r.deleted_at IS NULL AND j.value = p.id))',NULL);`);
+ expect((await call('/v1/rows/patch',patch())).status).toBe(200);
+ const revision=()=>({expected_revision:data.db.query('SELECT updated_at,hub_at FROM contacts').get()});
+ // A term after the group, or a group closing before the end, is not a deletion guard.
+ const guard=data.db.query('SELECT sql FROM catalog_rules').get().sql;
+ // A comment hiding a parenthesis is not a deletion guard either.
+ for(const sql of [guard+' OR p.enabled=1',guard.replace('AND (EXISTS','AND (1) OR (EXISTS'),guard.replace(/p\.id\)\)$/,'p.id) /* ( */) OR p.enabled=1 --)')]){
+  data.db.query('UPDATE catalog_rules SET sql=?').run(sql);
+  expect((await call('/v1/rows/patch',patch({enabled:0},revision()))).status).toBe(403);
+ }
+ expect(data.db.query('SELECT enabled FROM contacts').get().enabled).toBe(1);
+});
+
 test('derived tables accept patches that touch neither derived values nor their inputs',async()=>{
  const derived=`INSERT INTO catalog_properties(id,tbl,col,type,required,derived_by,inputs) VALUES ('contacts.name','contacts','name','text',0,'http:lookup','["id"]')`;
  const {call,data}=await setup([...scopes,'tables:patch:contacts:name']);

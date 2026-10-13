@@ -61,10 +61,16 @@ export async function catalogProjection(request,tenant) {
       }
       const readOnly=['id','created_at','updated_at','hub_at','deleted_at'].includes(column)
         || !!p.derived_by || !!p.immutable || !!p.options_sql || !tenant.scopes.includes(`tables:patch:${body.table}:${column}`);
-      return {column,type:p.type,description:p.description??null,required:!!p.required,readOnly,...(options===undefined?{}:{options})};
+      // A static default is plain catalog text; a sql: default is never disclosed.
+      const fallback=typeof p.default_value==='string' && !p.default_value.startsWith('sql:') ? {default:p.default_value} : {};
+      return {column,type:p.type,description:p.description??null,required:!!p.required,readOnly,...(options===undefined?{}:{options}),...fallback};
     });
+    // The table's enforced rule texts, never their SQL, for any catalog reader of the table.
+    const rules=await view.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_rules'").first()
+      ? (await view.prepare("SELECT text FROM catalog_rules WHERE tbl=? AND kind='invariant' AND enforce != 0 AND deleted_at IS NULL AND text IS NOT NULL AND text != '' ORDER BY id")
+        .bind(body.table).all()).results.map(r=>r.text) : [];
     await db.batch(readGuards(db,view.reads));
-    return reply({table:body.table,properties});
+    return reply({table:body.table,properties,rules});
   } catch(error) {
     if(error instanceof ScopeDenied) return reply({error:'insufficient scope'},403);
     return reply({error:'metadata unavailable'},409);

@@ -845,7 +845,7 @@ cursor, page or batch meets the replica read budget
 (`worker/test/scoped-sync.test.js`). Global schema/catalog/stats/history/
 provenance/internal/view/SQL routes stay denied. File grants remain independent. Narrow writes require a catalogued base
 table with safe defaults and no generated expressions, arbitrary triggers,
-derivations, ineligible enforced SQL rules or physical foreign keys. An enforced
+derivations (except as below), ineligible enforced SQL rules or physical foreign keys. An enforced
 table invariant is eligible when it matches one of the three anchored templates
 in `scopes.js` (row pattern rejection, conditional JSON-tag membership,
 same-table uniqueness), or when `confinedInvariant` finds that its SQL names no
@@ -856,9 +856,15 @@ closed. `provenance:create:<table>` (with `tables:write:<table>`) admits
 insert-only `imported_from`/`evidence_of` edges onto live rows of that table
 through `/v1/rows/insert` (`authorizeEdges`, then `edgePolicy` over
 `scopedOrigin`), with canonical ids `<from_kind>:<from_ref>:<to_kind>:<to_ref>`;
-the contract is in `docs/scoped-enrollment.md`. Column patches additionally admit the incoming single/multi-reference
-deletion guards and derived tables when the patch touches no derived column or
-derivation input (`patch.js` passes the patched columns to the policy). Their columns and ownership are checked; validation remains
+the contract is in `docs/scoped-enrollment.md`. Column patches additionally admit deletion guards
+(`SELECT a.id FROM changed a WHERE a.deleted_at IS NOT NULL AND <term>`, one
+`EXISTS (...)` or parenthesized term ending the statement, recognized by
+`closesAtEnd`) and derived tables when the patch touches no derived column or
+derivation input (`patch.js` passes the patched columns to the policy). Narrow
+inserts (`scopedInsertTable`, given the request's `columns`) admit derived
+tables when no derived column is listed, and the deletion guards when
+`deleted_at` is neither listed nor defaulted; the insert route then derives the
+new rows in the background as for a full writer. Their columns and ownership are checked; validation remains
 transactional. `GET /v1/catalog/options?table=X&column=Y` exposes only static
 select choices under the exact table-read grant, never dynamic SQL or other
 catalog metadata. Eligibility reads join
@@ -985,7 +991,7 @@ and rows past a call's limit or budget, are reported in `failed`, never dropped.
 Manual record Resolve uses `POST /v1/derive/resolve` with exactly one `ids`
 entry, `col` and required `expectedUpdatedAt`. The separate route makes older
 hubs fail closed. It shares broad table-write authorization; narrow table/column
-writers cannot invoke external derivations. The displayed row revision must
+writers cannot invoke it, and their inserts derive only the rows they create. The displayed row revision must
 match the guarded provider snapshot before HTTP; existing read guards reject
 provider-time changes. Core `resolveDerived` requires a bound replica, a live
 saved derived property and matching local/hub revisions, and never writes local
@@ -1157,7 +1163,9 @@ bindings require reenrollment; config-less legacy hashes remain stable.
 Canonical config checks export from `soma-core/consumer-config`; generated
 Swift/TypeScript DTOs come from `core/contract/core.json`. Profiles admit up to
 256 distinct grants. Metadata grants require matching row read grants;
-projection never executes or discloses dynamic option SQL. These endpoints
+projection adds each granted column's static default (never a `sql:` one) and
+the table's enforced rule texts, and never executes or discloses dynamic option,
+default or rule SQL. These endpoints
 confer no replica, arbitrary SQL or general catalog authority.
 
 ## File service

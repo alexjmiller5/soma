@@ -51,7 +51,7 @@ test('metadata projection requires every grant and discloses only static propert
  const response=await call(env,'/v1/catalog/projection',request);
  expect(response.status).toBe(200);
  const data=await response.json();
- expect(data).toEqual({table:'items',properties:[{column:'status',type:'select',description:'Progress',required:true,readOnly:true,options:[{v:'open'},{v:'done'}]}]});
+ expect(data).toEqual({table:'items',properties:[{column:'status',type:'select',description:'Progress',required:true,readOnly:true,options:[{v:'open'},{v:'done'}]}],rules:[]});
  expect(JSON.stringify(data)).not.toContain('SELECT');expect(JSON.stringify(data)).not.toContain('hidden');
  expect((await call(env,'/v1/catalog/projection',{table:'items',columns:['status','id']})).status).toBe(403);
  expect((await call(env,'/v1/catalog/projection',{table:'hidden',columns:['status']})).status).toBe(403);
@@ -107,4 +107,30 @@ test('oversized chunked projection input cancels before reading the whole body',
  const request=new Request('https://hub.test/v1/catalog/projection',{method:'POST',headers:{Authorization:'Bearer device'},body});
  const response=await worker.fetch(request,env,{waitUntil(){}});
  expect(response.status).toBe(413);expect(cancelled).toBe(true);expect(pulls).toBeLessThan(5);
+});
+
+test('metadata projection discloses static defaults and enforced rule texts, never their SQL',async()=>{
+ const request={table:'items',columns:['status']};
+ let env=await fixture();
+ const read=async()=>await (await call(env,'/v1/catalog/projection',request)).json();
+ // A hub without catalog rules or a default column projects neither.
+ expect(await read()).toEqual({table:'items',properties:[{column:'status',type:'select',description:'Progress',required:true,readOnly:true,options:[{v:'open'},{v:'done'}]}],rules:[]});
+ // A fresh hub: bun:sqlite keeps a cached statement's original column list.
+ env=await fixture();
+ env.DB.db.exec(`ALTER TABLE catalog_properties ADD COLUMN default_value TEXT;UPDATE catalog_properties SET default_value='open';
+ CREATE TABLE catalog_rules(id TEXT PRIMARY KEY,tbl TEXT,scope TEXT,kind TEXT,enforce INTEGER,sql TEXT,text TEXT,deleted_at TEXT);
+ INSERT INTO catalog_rules VALUES
+  ('b','items','table','invariant',1,'SELECT id FROM changed WHERE secret_b','Second rule.',NULL),
+  ('a','items','table','invariant',1,'SELECT id FROM changed WHERE secret_a','First rule.',NULL),
+  ('advisory','items','table','invariant',0,'SELECT 1','Advisory.',NULL),
+  ('doctrine','items','table','doctrine',1,NULL,'Doctrine.',NULL),
+  ('gone','items','table','invariant',1,'SELECT 1','Deleted.','2026-01-01T00:00:00.000Z'),
+  ('textless','items','table','invariant',1,'SELECT id FROM changed WHERE secret_c',NULL,NULL),
+  ('other','hidden','table','invariant',1,'SELECT 1','Other table.',NULL);`);
+ const data=await read();
+ expect(data.properties[0].default).toBe('open');
+ expect(data.rules).toEqual(['First rule.','Second rule.']);
+ expect(JSON.stringify(data)).not.toContain('secret');
+ env.DB.db.exec("UPDATE catalog_properties SET default_value='sql:SELECT secret FROM hidden'");
+ expect((await read()).properties[0]).not.toHaveProperty('default');
 });

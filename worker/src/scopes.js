@@ -100,16 +100,30 @@ const localRules = [
   new RegExp(`^${rowRule} AND NOT EXISTS \\(SELECT 1 FROM json_each\\(coalesce\\(${ruleColumn},'\\[\\]'\\)\\) WHERE value = ${ruleLiteral}\\)(?![\\s\\S])`),
 ];
 const uniqueRule = new RegExp(String.raw`^SELECT c\.id FROM changed c JOIN ${ruleColumn} b ON b\.${ruleColumn} = c\.\2 AND b\.id != c\.id AND b\.deleted_at IS NULL WHERE c\.deleted_at IS NULL AND c\.\2 IS NOT NULL(?![\s\S])`);
-// A live-row patch cannot change deleted_at. Admit only this complete deletion
-// guard shape, which is false for every eligible changed row, not arbitrary SQL.
-const incomingDeletionRule = /^SELECT ([A-Za-z_][A-Za-z0-9_]*)\.id FROM changed \1 WHERE \1\.deleted_at IS NOT NULL AND EXISTS \(SELECT 1 FROM ([A-Za-z_][A-Za-z0-9_]*) ([A-Za-z_][A-Za-z0-9_]*), json_each\(\3\.([A-Za-z_][A-Za-z0-9_]*)\) ([A-Za-z_][A-Za-z0-9_]*) WHERE \3\.deleted_at IS NULL AND \5\.value = \1\.id\)(?![\s\S])/;
-// The same guard over a single-reference column (`q.<col> = <alias>.id`).
-const incomingReferenceRule = /^SELECT ([A-Za-z_][A-Za-z0-9_]*)\.id FROM changed \1 WHERE \1\.deleted_at IS NOT NULL AND EXISTS \(SELECT 1 FROM ([A-Za-z_][A-Za-z0-9_]*) ([A-Za-z_][A-Za-z0-9_]*) WHERE \3\.deleted_at IS NULL AND \3\.([A-Za-z_][A-Za-z0-9_]*) = \1\.id\)(?![\s\S])/;
-function scopedInvariant(rule, table, columns, livePatch) {
+// A deletion guard, `SELECT a.id FROM changed a WHERE a.deleted_at IS NOT NULL
+// AND <term>` whose single EXISTS (...) or parenthesized term ends the statement,
+// is false for every live changed row whatever the term reads. A live-row patch
+// cannot change deleted_at and a live insert never sets it, so either admits it.
+const deletionGuard = /^SELECT ([A-Za-z_][A-Za-z0-9_]*)\.id FROM changed \1 WHERE \1\.deleted_at IS NOT NULL AND (?:EXISTS )?\(/;
+function closesAtEnd(sql, open) {
+  let depth=0;
+  for (let i=open; i<sql.length; i++) {
+    const c=sql[i];
+    if (`'"\`[`.includes(c)) {
+      // A doubled quote closes and reopens: the same span for paren counting.
+      i=sql.indexOf(c==='['?']':c,i+1);
+      if (i<0) return false;
+    } else if (c==='(') depth++;
+    else if (c===')' && --depth===0) return i===sql.length-1;
+  }
+  return false;
+}
+function scopedInvariant(rule, table, columns, liveRows) {
   if (rule.scope !== 'table' || rule.tbl !== table || rule.enforce !== 1 || typeof rule.sql !== 'string') return false;
   const names = new Set(columns.map(c => c.name));
   if (!names.has('id') || !names.has('deleted_at')) return false;
-  if (livePatch && (incomingDeletionRule.test(rule.sql) || incomingReferenceRule.test(rule.sql))) return true;
+  const guard = liveRows && deletionGuard.exec(rule.sql);
+  if (guard && sqlWords(rule.sql) && closesAtEnd(rule.sql, guard[0].length-1)) return true;
   for (const pattern of localRules) {
     const match = pattern.exec(rule.sql);
     if (match) return match.slice(1).every(col => names.has(col));
@@ -218,6 +232,11 @@ export function scopedTable(view,table,write=false,rowIds=null) {
 export function scopedPatchTable(view,table,write,rowIds,patched=[]) {
   return inspectTable(view,table,write,rowIds,false,true,false,patched);
 }
+// rows/insert never changes an existing row, so a derived column it does not
+// list stays the hub's to fill; listing one keeps the write denied.
+export function scopedInsertTable(inserted) {
+  return (view,table,write,rowIds)=>inspectTable(view,table,write,rowIds,false,false,false,null,inserted);
+}
 // A live patch leaves a derivation intact when it writes neither the derived
 // column nor any of its inputs; unreadable inputs count as touched.
 function derivationUntouched(prop,patched) {
@@ -239,7 +258,7 @@ export function prefetchTables(view, tables) {
     ['SELECT * FROM pragma_table_xinfo(?) ORDER BY cid', [table], false],
   ]));
 }
-async function inspectTable(view, table, write, rowIds, origin, livePatch=false, changeset=false, patched=null) {
+async function inspectTable(view, table, write, rowIds, origin, livePatch=false, changeset=false, patched=null, inserted=null) {
   if (!ordinaryName(table) && !(origin && table === 'provenance')) deny();
   if (write && (!Array.isArray(rowIds) || rowIds.some(id=>typeof id !== 'string' || !id.trim()))) deny();
   const schema=await view.prepare("SELECT name,type,sql FROM sqlite_master WHERE name=?").bind(table).first();
@@ -276,12 +295,15 @@ async function inspectTable(view, table, write, rowIds, origin, livePatch=false,
   if (foreignKeys.length) deny();
   if (!await view.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_properties'").first()) deny();
   const {results:props}=await view.prepare('SELECT * FROM catalog_properties WHERE tbl=? AND deleted_at IS NULL ORDER BY id').bind(table).all();
-  if (!props.length || props.some(p=>(p.options_sql && !(changeset && supportedRuleSql(p.options_sql)) && !(origin && originOptions.get(p.col) === p.options_sql)) || (p.derived_by && !(livePatch && Array.isArray(patched) && derivationUntouched(p,patched))) || String(p.default_value ?? '').startsWith('sql:'))) deny();
+  if (!props.length || props.some(p=>(p.options_sql && !(changeset && supportedRuleSql(p.options_sql)) && !(origin && originOptions.get(p.col) === p.options_sql)) || (p.derived_by && !(livePatch && Array.isArray(patched) && derivationUntouched(p,patched)) && !(Array.isArray(inserted) && !inserted.includes(p.col))) || String(p.default_value ?? '').startsWith('sql:'))) deny();
   if(changeset && columns.some(c=>!['id','created_at','updated_at','hub_at'].includes(c.name) && /\b(?:strftime|randomblob)\s*\(/i.test(c.dflt_value ?? '')))deny();
   for (const prop of props) if (prop.ref_table) await scopedTable(view,prop.ref_table);
   if (await view.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_rules'").first()) {
     const {results:rules}=await view.prepare("SELECT * FROM catalog_rules WHERE deleted_at IS NULL AND kind='invariant' AND enforce != 0 AND (tbl=? OR scope='estate') ORDER BY id").bind(table).all();
-    for (const rule of rules) if (!(changeset && rule.tbl===table && rule.scope==='table' && supportedRuleSql(rule.sql)) && !scopedInvariant(rule,table,columns,livePatch)
+    // Inserted rows are live when deleted_at is neither listed nor defaulted.
+    const liveRows=livePatch || (Array.isArray(inserted) && !inserted.includes('deleted_at')
+      && columns.some(c=>c.name==='deleted_at' && c.dflt_value==null));
+    for (const rule of rules) if (!(changeset && rule.tbl===table && rule.scope==='table' && supportedRuleSql(rule.sql)) && !scopedInvariant(rule,table,columns,liveRows)
       && !(origin ? await originInvariant(view,rule) : await confinedInvariant(view,rule,table))) deny();
   }
   return columns;

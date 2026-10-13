@@ -4951,6 +4951,10 @@
           "items": {
             "$ref": "#/$defs/CatalogProjectionOption"
           }
+        },
+        "default": {
+          "type": "string",
+          "description": "The property's static catalog default; a SQL default is never disclosed."
         }
       },
       "required": [
@@ -4972,6 +4976,13 @@
           "items": {
             "$ref": "#/$defs/CatalogProjectedProperty"
           }
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The table's enforced invariant texts, never their SQL."
         }
       },
       "required": [

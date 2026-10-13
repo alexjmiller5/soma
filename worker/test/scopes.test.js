@@ -1,11 +1,11 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import worker from '../src/index.js';
 import fixture from '../../tests/fixtures/hub-capabilities-contract.json';
 import { D1Shim } from './d1shim.js';
 
-async function setup(scopes, dataDb = null) {
-  const env = {HUB_TOKEN:'operator-fixture',AUTH_DB:new D1Shim(),DB:dataDb ?? {prepare(){throw new Error('unexpected data access');}}};
-  const ctx = {waitUntil(){}};
+async function setup(scopes, dataDb = null, extraEnv = {}) {
+  const env = {HUB_TOKEN:'operator-fixture',AUTH_DB:new D1Shim(),DB:dataDb ?? {prepare(){throw new Error('unexpected data access');}},...extraEnv};
+  const pending = [], ctx = {waitUntil(p){pending.push(p);}};
   const mint = await worker.fetch(new Request('https://hub.test/v1/tokens/create',{
     method:'POST',headers:{Authorization:'Bearer operator-fixture'},
     body:JSON.stringify({name:'consumer-fixture',scopes:scopes.join(',')}),
@@ -14,7 +14,7 @@ async function setup(scopes, dataDb = null) {
   const call = (path,method='GET',body) => worker.fetch(new Request(`https://hub.test${path}`,{
     method,headers:{Authorization:`Bearer ${token}`},body:body === undefined ? undefined : JSON.stringify(body),
   }),env,ctx);
-  return {call,env};
+  return {call,env,pending};
 }
 
 for (const entry of fixture.sessions) test(`session capability contract: ${entry.scopes.join(',')}`,async()=>{
@@ -573,4 +573,43 @@ test('manual Resolve keeps broad table-write authorization and denies read-only 
   }
   const {call}=await setup(['tables:write'],rowDb());
   expect((await call('/v1/derive/resolve','POST',{})).status).toBe(400);
+});
+
+const provenanceTable = `CREATE TABLE provenance(id TEXT PRIMARY KEY,from_kind TEXT,from_ref TEXT,to_kind TEXT,to_ref TEXT,rel TEXT,field TEXT,detail TEXT,asserted_by TEXT,inputs_hash TEXT,value_hash TEXT,produced_at TEXT,created_at TEXT,updated_at TEXT,deleted_at TEXT,hub_at TEXT)`;
+test('narrow inserts leave derived columns to the hub, which derives them as for a full writer',async()=>{
+  const db=rowDb();
+  db.db.exec(`ALTER TABLE articles ADD COLUMN title TEXT;${provenanceTable};
+    INSERT INTO catalog_properties(id,tbl,col,type,derived_by,inputs) VALUES ('articles.title','articles','title','text','http:title','["url"]')`);
+  const fetch=spyOn(globalThis,'fetch').mockImplementation(async()=>new Response(JSON.stringify({title:'Derived'})));
+  try {
+    const {call,pending}=await setup(['tables:write:articles'],db,{DERIVATIONS:JSON.stringify({title:{url:'https://derive.example'}})});
+    const created=await call('/v1/rows/insert','POST',insert());
+    expect(created.status).toBe(200);
+    expect(await created.json()).toEqual({inserted:['b'],existing:[],rejected:[]});
+    await Promise.all(pending);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(db.db.query("SELECT title FROM articles WHERE id='b'").get().title).toBe('Derived');
+    // Supplying a derived column, or an upsert of the table, stays denied.
+    expect((await call('/v1/rows/insert','POST',insert({columns:['id','url','title','updated_at'],rows:[{id:'c',url:'https://example.test/c',updated_at:revision}]}))).status).toBe(403);
+    expect((await call('/v1/rows/push','POST',insert({rows:[{id:'b',url:'https://example.test/d',updated_at:'2026-10-03T00:00:01.000Z'}]}))).status).toBe(403);
+    expect(db.db.query("SELECT count(*) AS n FROM articles WHERE id IN ('c','d')").get().n).toBe(0);
+  } finally { fetch.mockRestore(); }
+});
+
+// The guard reads another table, but only for a tombstoned changed row.
+const deletionGuard = "SELECT a.id FROM changed a WHERE a.deleted_at IS NOT NULL AND (EXISTS (SELECT 1 FROM secrets s WHERE s.deleted_at IS NULL AND s.value = a.id) OR EXISTS (SELECT 1 FROM secrets s WHERE s.id = a.id))";
+test('narrow inserts of live rows keep a deletion invariant that reads another table',async()=>{
+  const db=rowDb();
+  db.db.exec(`INSERT INTO articles(id,url,updated_at,deleted_at) VALUES ('s','https://example.test/s','${revision}','${revision}')`);
+  db.db.query("INSERT INTO catalog_rules VALUES ('guard','articles','invariant',1,'table',?,NULL)").run(deletionGuard);
+  const {call}=await setup(['tables:write:articles'],db);
+  const created=await call('/v1/rows/insert','POST',insert({rows:[{id:'b',url:'https://example.test/b',updated_at:revision},{id:'s',url:'https://example.test/x',updated_at:revision}]}));
+  expect(created.status).toBe(200);
+  // The existing tombstone is reported unchanged; the guard never evaluates it.
+  expect(await created.json()).toEqual({inserted:['b'],existing:['s'],rejected:[]});
+  // A write that can tombstone a row would evaluate the guard, so it is denied.
+  expect((await call('/v1/rows/insert','POST',insert({columns:['id','url','updated_at','deleted_at'],rows:[{id:'c',url:'u',updated_at:revision,deleted_at:null}]}))).status).toBe(403);
+  expect((await call('/v1/rows/push','POST',insert())).status).toBe(403);
+  db.db.exec("ALTER TABLE articles RENAME TO old_articles; CREATE TABLE articles(id TEXT PRIMARY KEY,url TEXT,updated_at TEXT,deleted_at TEXT DEFAULT 'x',hub_at TEXT)");
+  expect((await call('/v1/rows/insert','POST',insert({rows:[{id:'e',url:'u',updated_at:revision}]}))).status).toBe(403);
 });
