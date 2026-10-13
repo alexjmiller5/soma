@@ -957,10 +957,9 @@ upstream responses) is stored first in `ARCHIVE` at
 `raw/derivations/<name>/<sha256 of its JSON>.json` and cited as `"raw"` in
 every proof `detail` of that call; an invalid `_raw`, a missing bucket or a
 failed write fails the row with nothing written. No-data checks parse
-`detail` JSON (`no_data` true), never compare its text. On a wide table (songs)
-one derivation writing about nine columns exceeds a D1 limit in the guarded
-batch (`Expression tree is too large` / `integer overflow`); keep a derivation
-to five columns or fewer there, adding another name for the same endpoint. A 2xx object is a completed lookup: each derived
+`detail` JSON (`no_data` true), never compare its text. Guarded writes balance
+column predicates to stay within D1's expression-depth limit on wide tables.
+A 2xx object is a completed lookup: each derived
 column it omits gets a no-data proof (`detail` `{"no_data":true}`, `value_hash`
 of the value left in place, which is never cleared), so a no-match stops being
 retried every sweep. No-data proofs refresh after `no_data_refresh_days`
