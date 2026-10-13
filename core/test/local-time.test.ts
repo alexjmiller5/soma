@@ -28,7 +28,7 @@ test('relative now: date-only counts all day, local times compare with localNow,
     ['noon', '2032-10-13T12:00'], ['at-now', '2032-10-13T12:30'], ['evening', '2032-10-13T18:00'],
     ['after-midnight', '2032-10-14T01:00'], ['early', '2032-10-13T01:00'],
     ['instant-past', '2032-10-13T15:00:00.000Z'], ['instant-now', calendar.now], ['instant-later', '2032-10-13T17:00:00.000Z'],
-    ['naive-seconds', '2032-10-13T12:00:00'], ['impossible', '2032-02-30T12:00'], ['empty', null],
+    ['naive-seconds', '2032-10-13T12:00:00'], ['impossible', '2032-02-30T12:00'], ['hour-24', '2032-10-13T24:00'], ['empty', null],
   ]);
   const now = (op: string) => ids({ calendar, filters: [{ column: 'due', op, relative: 'now' }] as View['filters'] });
   expect(now('lte')).toEqual(['at-now', 'early', 'instant-now', 'instant-past', 'noon', 'today', 'yesterday']);
@@ -103,4 +103,14 @@ test('calendar layout puts a local time on the day whose local bounds hold it', 
   // Without local bounds a local time stays visible as undated rather than guessed.
   const legacy = days.map(({ localStart: _s, localEnd: _e, ...day }) => day);
   expect(calendarRows({ rows: [rows[1]!], dateColumn: 'start', days: legacy }).undated).toEqual(['noon']);
+});
+
+test('relative date SQL calls only the functions read-only plan hosts allow', () => {
+  // The widget extension authorizer allows exactly these SQL functions.
+  const allowed = new Set(['length', 'date', 'julianday', 'glob', 'substr', 'instr', 'lower', 'json_valid', 'json_type', 'json_array_length', 'json_extract', 'count', 'sum']);
+  for (const relative of ['today', 'now'] as const) {
+    const { sql } = compileView({ table: 'items', calendar, filters: [{ column: 'due', op: 'lte', relative }] }, [{ col: 'due', type: 'date_or_datetime' }]);
+    const called = [...sql.matchAll(/([a-z_]+)\(/g)].map(m => m[1]!);
+    expect(called.filter(name => !allowed.has(name))).toEqual([]);
+  }
 });

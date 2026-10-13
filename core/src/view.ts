@@ -136,7 +136,8 @@ function compile(view: View, properties: Property[], requireCalendar: boolean | 
       const op={eq:'=',ne:'!=',gt:'>',gte:'>=',lt:'<',lte:'<='}[filter.op as 'eq'|'ne'|'gt'|'gte'|'lt'|'lte'];
       const dateOnly=`(length(${col})=10 AND ${col} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(${col},'+0 days')=${col})`;
       // A floating local time (YYYY-MM-DDTHH:MM) compares as text with local slots.
-      const local=`(length(${col})=16 AND ${col} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-2][0-9]:[0-5][0-9]' AND strftime('%Y-%m-%dT%H:%M',${col})=${col})`;
+      // Only functions read-only plan hosts allow (length, glob, substr, date).
+      const local=`(length(${col})=16 AND ${col} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-2][0-9]:[0-5][0-9]' AND substr(${col},12,2)<'24' AND date(substr(${col},1,10),'+0 days')=substr(${col},1,10))`;
       const dateComparison=`${col} ${op} ${bindCalendar('today')}`;
       const instant=`julianday(${col})`;
       // The same interval test over instants or, with local bounds, floating local times.
