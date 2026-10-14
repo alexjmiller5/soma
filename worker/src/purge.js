@@ -50,6 +50,15 @@ export async function applyPurges(db, markers) {
   if (!live.length) return;
   if(live.some(m=>typeof m.tbl==='string' && /_governance_/i.test(m.tbl)))throw new ScopeDenied();
   const [hasHistory, hasProvenance] = [await exists(db, "history"), await exists(db, "provenance")];
+  // Replica engine indexes are not schema-log DDL, so the hub installs its own.
+  // SQLite can index the provenance OR only when both endpoints are indexed.
+  const indexes = [];
+  if (hasProvenance && live.some(m => m.col == null)) indexes.push(
+    db.prepare("CREATE INDEX IF NOT EXISTS provenance_to ON provenance(to_kind,to_ref)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS provenance_from ON provenance(from_kind,from_ref)"),
+  );
+  if (hasHistory) indexes.push(db.prepare("CREATE INDEX IF NOT EXISTS history_row ON history(tbl,row_id,col)"));
+  if (indexes.length) await db.batch(indexes);
   const hasReceipts=await exists(db,'_governance_receipts');
   const hasProposals=await exists(db,'_governance_proposals');
   const hasInvalidations=await exists(db,'_governance_invalidations');

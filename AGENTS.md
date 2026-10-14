@@ -546,6 +546,10 @@ reads never provision either store or rewrite saved definitions.
   moves `purged_at` forward to cover a re-import. Only `soma purge` writes
   `purges`; provenance is purgeable user evidence, while other engine tables remain protected. Keep both implementations
   in step.
+  The hub ensures the engine's `provenance_to`, `provenance_from` and
+  `history_row` indexes before cleanup, so both endpoint branches and history
+  lookups avoid full scans. Cleanup retains its existing single transaction;
+  retries safely replay the markers.
 - **A soft-deleted row is never validated** (its cells are history, not a
   claim), but its cell changes are still logged.
 - **`rename_table` is the only table rename** and **`rename_column`

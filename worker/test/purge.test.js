@@ -94,3 +94,35 @@ test("the hub's own event for an edit a column marker covers is removed too", as
   expect(results).toEqual([]);
   expect(JSON.stringify((await db.prepare("SELECT * FROM history").all()).results)).not.toContain("secret");
 });
+
+test("purge cleanup uses indexes for both provenance endpoints and history", async () => {
+  const db = await seed();
+  // An existing target index alone cannot serve the OR's source branch.
+  db.db.exec("CREATE INDEX provenance_to ON provenance(to_kind,to_ref,field)");
+  await pushMarker(db);
+  for (const [sql, args] of [
+    ["DELETE FROM provenance WHERE updated_at <= ? AND ((to_kind = ? AND to_ref = ?) OR (from_kind = ? AND from_ref = ?))", [T2, "items", "r1", "items", "r1"]],
+    ["DELETE FROM history WHERE tbl = ? AND row_id = ? AND created_at <= ?", ["items", "r1", T2]],
+    ["DELETE FROM history WHERE tbl = ? AND row_id = ? AND col = ? AND created_at <= ?", ["items", "r1", "name", T2]],
+  ]) {
+    const plan = db.db.query("EXPLAIN QUERY PLAN " + sql).all(...args).map(r => r.detail).join("\n");
+    expect(plan).not.toMatch(/SCAN (provenance|history)/);
+    expect(plan).toContain("SEARCH");
+  }
+});
+
+test("column purge does not require unrelated provenance columns", async () => {
+  const db = await seed();
+  db.db.exec("DROP TABLE provenance; CREATE TABLE provenance(id TEXT PRIMARY KEY,detail TEXT,updated_at TEXT)");
+  await pushMarker(db, "name");
+  expect(await ids(db, "SELECT id FROM history")).toEqual(["h2"]);
+  expect(await ids(db, "SELECT id FROM items")).toEqual(["r1"]);
+});
+
+test("row purge indexes provenance endpoints without requiring a field column", async () => {
+  const db = await seed();
+  db.db.exec("ALTER TABLE provenance DROP COLUMN field");
+  await pushMarker(db);
+  expect(await ids(db, "SELECT id FROM provenance")).toEqual([]);
+  expect(await ids(db, "SELECT id FROM history")).toEqual([]);
+});
