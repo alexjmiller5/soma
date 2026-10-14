@@ -571,9 +571,10 @@ const ROUTES = {
         const msg = String(e).toLowerCase();
         // replay is idempotent-by-skip for DDL the hub already has: a CREATE that
         // exists, an ADD of a column it has, a RENAME of a column already gone, a
-        // table RENAME whose source is already gone
+        // table RENAME whose source is already gone, or a DROP VIEW already absent
         const renamedAway = msg.includes("no such table") && RENAME_TABLE.test(entry.ddl);
-        if (!msg.includes("already exists") && !msg.includes("duplicate column") && !msg.includes("no such column") && !renamedAway) throw e;
+        const droppedView = msg.includes("no such view") && /^\s*DROP\s+VIEW\b/i.test(entry.ddl);
+        if (!msg.includes("already exists") && !msg.includes("duplicate column") && !msg.includes("no such column") && !renamedAway && !droppedView) throw e;
       }
       await db
         .prepare("INSERT INTO _schema_log (applied_at, ddl) VALUES (?, ?)")

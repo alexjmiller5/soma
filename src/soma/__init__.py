@@ -644,7 +644,7 @@ class LocalHub:
             try:
                 self._query(e["ddl"])
             except Exception as exc:  # replay skips DDL the hub already has
-                if not _already_applied(exc):
+                if not _already_applied(exc, e["ddl"]):
                     raise
             self._query(
                 "INSERT INTO _schema_log (applied_at, ddl) VALUES (?, ?)",
@@ -1273,9 +1273,12 @@ def _already_applied(exc: Exception, ddl: str = "") -> bool:
     """Replay is idempotent-by-skip: a CREATE that already exists, an ADD of a
     column already there, a RENAME of a column that is already gone (a fresh
     replica creates engine tables in their current shape, then replays the log
-    that got them there), or a table RENAME whose source is already gone."""
+    that got them there), a table RENAME whose source is already gone, or a
+    DROP VIEW whose target is already absent."""
     msg = str(exc).lower()
     if "already exists" in msg or "duplicate column" in msg or "no such column" in msg:
+        return True
+    if "no such view" in msg and re.match(r"^\s*DROP\s+VIEW\b", ddl, re.IGNORECASE):
         return True
     return "no such table" in msg and bool(RENAME_TABLE.match(ddl))
 

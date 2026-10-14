@@ -147,7 +147,8 @@ async function syncLocked(db: SqlDriver, hub: Hub, options: SyncOptions): Promis
       try { await db.run(entry.ddl); }
       catch (error) {
         const message=String(error).toLowerCase();
-        if (!['already exists','duplicate column','no such column'].some(s=>message.includes(s)) && !(message.includes('no such table')&&/^\s*ALTER\s+TABLE\s+\S+\s+RENAME\s+TO\b/i.test(entry.ddl))) throw error;
+        const droppedView=message.includes('no such view') && /^\s*DROP\s+VIEW\b/i.test(entry.ddl);
+        if (!['already exists','duplicate column','no such column'].some(s=>message.includes(s)) && !(message.includes('no such table')&&/^\s*ALTER\s+TABLE\s+\S+\s+RENAME\s+TO\b/i.test(entry.ddl)) && !droppedView) throw error;
       }
       await db.run('INSERT INTO _schema_log(applied_at,ddl) VALUES (?,?)',[entry.applied_at,entry.ddl]);
       // A table this entry created, dropped, renamed or altered needs its next

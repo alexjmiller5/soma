@@ -359,3 +359,16 @@ test("a preserved deprecated value rides along with whole-row and sparse pushes;
   out = await push([...cols, "legacy"], [row({ id: "fresh", legacy: 1 })]);
   expect(out.rejected[0]).toMatchObject({ id: "fresh", col: "legacy", rule: "deprecated" });
 });
+
+
+test("schema push replays an absent view drop before its replacement", async () => {
+  const db = new D1Shim();
+  db.db.exec("CREATE TABLE _schema_log(id INTEGER PRIMARY KEY,applied_at TEXT,ddl TEXT)");
+  const entries = ['DROP VIEW "rollup"', 'CREATE VIEW "rollup" AS SELECT 42 AS total']
+    .map(ddl => ({ applied_at: "2026-01-01T00:00:00.000Z", ddl }));
+  expect(await ROUTES["/v1/schema/push"]({ entries }, db)).toEqual({ applied: 2 });
+  expect((await db.prepare("SELECT * FROM rollup").all()).results).toEqual([{ total: 42 }]);
+  expect(await ROUTES["/v1/schema/push"]({ entries }, db)).toEqual({ applied: 0 });
+  expect((await db.prepare("SELECT count(*) AS n FROM _schema_log").first()).n).toBe(2);
+  await expect(ROUTES["/v1/schema/push"]({ entries: [{ ...entries[0], ddl: "ALTER TABLE absent ADD COLUMN x TEXT" }] }, db)).rejects.toThrow("no such table");
+});

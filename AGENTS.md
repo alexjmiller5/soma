@@ -638,7 +638,8 @@ directory. Never reuse cursors from an unknown or different hub.
 
 State-based, never op-log. `sync(path, hub)`: `ensure_hub_at`, replay missing
 `_schema_log` DDL both ways (idempotent-by-skip on "already exists" /
-"duplicate column"), snapshot push candidates BEFORE applying the pull (else
+"duplicate column", renamed-away objects, or an absent DROP VIEW target),
+snapshot push candidates BEFORE applying the pull (else
 pulled rows echo straight back), pull then push, then advance the
 per-direction cursors in `_sync_state`; any rejection keeps last_push unchanged.
 A per-database file lock inside the shared sync entry point excludes overlapping

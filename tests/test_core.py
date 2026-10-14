@@ -1409,3 +1409,27 @@ def test_watch_survives_a_sync_crash(db, hub, monkeypatch, capsys):
     _mk_people(db, ["Ada"])
     watch(db, hub, once=True)  # must not raise: a launchd restart costs a credential read
     assert "sync deferred" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("target", ["replica", "hub"])
+def test_schema_replay_absent_view_drop_then_replacement(db, tmp_path, target):
+    from soma import _apply_local_ddl
+
+    entries = [
+        {"applied_at": "2026-01-01T00:00:00.000Z", "ddl": ddl}
+        for ddl in ['DROP VIEW "rollup"', 'CREATE VIEW "rollup" AS SELECT 42 AS total']
+    ]
+    if target == "hub":
+        hub = LocalHub(tmp_path / "hub.db")
+        hub.ensure_ready()
+        assert hub.schema_push(entries) == 2
+        assert hub.schema_push(entries) == 0
+        assert hub._query("SELECT * FROM rollup") == [{"total": 42}]
+    else:
+        for entry in entries:
+            _apply_local_ddl(db, entry)
+        assert execute_sql(db, "SELECT * FROM rollup") == [{"total": 42}]
+        assert all(
+            entry["ddl"] in {r["ddl"] for r in execute_sql(db, "SELECT ddl FROM _schema_log")}
+            for entry in entries
+        )

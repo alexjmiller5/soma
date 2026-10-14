@@ -399,3 +399,16 @@ test('a fresh replica reads the cursor once, after its schema exchange', async (
   expect(requests.filter(r=>r.route==='/v1/cursor').length).toBe(1);
   expect(requests.map(r=>r.route).slice(0,2)).toEqual(['/v1/schema/pull','/v1/cursor']);
 });
+
+
+test('fresh replica replays an absent view drop before its replacement', async () => {
+  const {db,remote,hub} = setup();
+  for (const ddl of ['DROP VIEW "rollup"','CREATE VIEW "rollup" AS SELECT 42 AS total']) {
+    remote.db.query('INSERT INTO _schema_log(applied_at,ddl) VALUES (?,?)').run(T1,ddl);
+  }
+  remote.db.exec('CREATE VIEW "rollup" AS SELECT 42 AS total');
+  await sync(db,hub);
+  expect(await db.all('SELECT * FROM rollup')).toEqual([{total:42}]);
+  await sync(db,hub);
+  expect(await db.all("SELECT count(*) AS n FROM _schema_log WHERE ddl LIKE '%rollup%'")).toEqual([{n:2}]);
+});
