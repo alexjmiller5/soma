@@ -318,3 +318,92 @@ def test_purge_provenance_removes_edge_and_its_history_on_every_replica(pair):
             == []
         )
         assert _rows(path, "items"), "Purging evidence preserves its subject"
+
+
+def _seed_bulk(path):
+    insert_rows(
+        path,
+        "items",
+        [{"id": "r2", "name": "original", "note": "old"}, {"id": "keep", "name": "keep"}],
+    )
+    execute_sql(path, "UPDATE items SET name='changed', note='new' WHERE id='r2'")
+    insert_rows(
+        path,
+        "provenance",
+        [
+            {
+                "id": "manual:y:r2",
+                "from_kind": "manual",
+                "from_ref": "y",
+                "to_kind": "items",
+                "to_ref": "r2",
+                "rel": "evidence_of",
+                "asserted_by": "test",
+            }
+        ],
+    )
+
+
+def test_cli_bulk_purge_reuses_row_semantics_and_deduplicates_ids(db, monkeypatch, capsys):
+    _seed_bulk(db)
+    monkeypatch.setenv("SOMA_DATA_DIR", str(db.parent))
+    db.rename(db.parent / "soma.db")
+    path = db.parent / "soma.db"
+    assert soma.main(["purge", "items", "r1", "r2", "r1"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"markers": 2}
+    assert execute_sql(path, "SELECT id FROM items") == [{"id": "keep"}]
+    assert execute_sql(path, "SELECT id FROM history WHERE tbl='items'") == []
+    assert execute_sql(path, "SELECT id FROM provenance") == []
+    assert len(execute_sql(path, "SELECT DISTINCT purged_at FROM purges")) == 1
+    assert {r["row_id"] for r in execute_sql(path, "SELECT row_id FROM purges")} == {"r1", "r2"}
+    assert {
+        r["row_id"] for r in execute_sql(path, "SELECT row_id FROM _sync_dirty WHERE tbl='purges'")
+    } == {'["items", "r1", null]', '["items", "r2", null]'}
+
+
+@pytest.mark.parametrize("cols", [["name"], ["name", "note"]])
+def test_bulk_column_purge_keeps_live_rows_and_unrelated_history(db, cols):
+    _seed_bulk(db)
+    assert purge(db, "items", ["r1", "r2"], cols=cols) == {"markers": 2 * len(cols)}
+    for rid in ["r1", "r2"]:
+        assert _rows(db, "items", rid)
+        assert _edges(db, rid)
+        assert _history(db, rid, "name") == []
+        assert bool(_history(db, rid, "note")) == ("note" not in cols)
+
+
+@pytest.mark.parametrize("ids", [[], ["r1", ""], ["r1", None]])
+def test_bulk_purge_preflights_every_id_before_writing(db, ids):
+    with pytest.raises(ValueError, match="row id"):
+        purge(db, "items", ids)
+    assert _rows(db, "items")
+    assert not execute_sql(db, "SELECT name FROM sqlite_master WHERE name='purges'")
+
+
+def test_bulk_purge_rolls_back_markers_and_all_cleanup_on_failure(db):
+    _seed_bulk(db)
+    with soma.connect(db) as conn:
+        conn.execute(
+            "CREATE TRIGGER block_second BEFORE DELETE ON items WHEN OLD.id='r2' BEGIN SELECT RAISE(ABORT,'blocked purge'); END"
+        )
+    with pytest.raises(soma.sqlite3.IntegrityError, match="blocked purge"):
+        purge(db, "items", ["r1", "r2"])
+    for rid in ["r1", "r2"]:
+        assert _rows(db, "items", rid)
+        assert _history(db, rid)
+        assert _edges(db, rid)
+    assert execute_sql(db, "SELECT * FROM purges") == []
+
+
+def test_bulk_purge_reaches_hub_and_other_replica(pair):
+    a, b, hub = pair
+    _seed_bulk(a)
+    assert not soma.sync(a, hub)["rejected"]
+    assert not soma.sync(b, hub)["rejected"]
+    assert purge(a, "items", ["r1", "r2"]) == {"markers": 2}
+    assert not soma.sync(a, hub)["rejected"]
+    assert not soma.sync(b, hub)["rejected"]
+    for path in (a, hub.path, b):
+        assert execute_sql(path, "SELECT id FROM items") == [{"id": "keep"}]
+        assert execute_sql(path, "SELECT id FROM history WHERE tbl='items'") == []
+        assert execute_sql(path, "SELECT id FROM provenance") == []

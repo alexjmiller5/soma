@@ -531,7 +531,7 @@ reads never provision either store or rewrite saved definitions.
   duplicate aggregate/original history until upgraded. Never infer away or
   delete original events, add client registries/gates, or require new endpoints.
   The one exception is a purge marker (below).
-- **`purges` is the only hard delete.** `soma purge <tbl> <id> [--col c]` writes
+- **`purges` is the only hard delete.** `soma purge <tbl> <id>... [--col c]` writes
   a content-free marker (id `json([tbl, row_id, col])`, `purged_at`) and
   deletes, wherever a marker is applied, the row, its history and its
   provenance edges (col NULL) or that column's history - only what is stamped
@@ -546,6 +546,8 @@ reads never provision either store or rewrite saved definitions.
   moves `purged_at` forward to cover a re-import. Only `soma purge` writes
   `purges`; provenance is purgeable user evidence, while other engine tables remain protected. Keep both implementations
   in step.
+  Multiple IDs share preflight, dirty tracking, cutoff and one marker/cleanup
+  transaction; duplicate IDs count once. Initial purge-table setup stays separate.
   The hub ensures the engine's `provenance_to`, `provenance_from` and
   `history_row` indexes before cleanup, so both endpoint branches and history
   lookups avoid full scans. Cleanup retains its existing single transaction;

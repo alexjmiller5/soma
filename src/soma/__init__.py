@@ -576,10 +576,18 @@ def _ensure_purges(path: Path) -> None:
         )
 
 
-def purge(path: Path, table: str, row_id: str, cols: list[str] | None = None) -> dict:
-    """Remove a row, or its listed columns' history, here and - through sync -
+def purge(path: Path, table: str, row_id: str | list[str], cols: list[str] | None = None) -> dict:
+    """Remove rows, or their listed columns' history, here and - through sync -
     on the hub and every replica. Redact a column's live value with a normal
     write first; this removes the trail of old values."""
+    row_ids = [row_id] if isinstance(row_id, str) else row_id
+    if (
+        not isinstance(row_ids, list)
+        or not row_ids
+        or any(not isinstance(rid, str) or not rid for rid in row_ids)
+    ):
+        raise ValueError("row ids must be nonempty strings")
+    row_ids = list(dict.fromkeys(row_ids))
     if (
         table.startswith(("_", "sqlite_"))
         or (table in catalog.CATALOG_TABLES and table != "provenance")
@@ -595,26 +603,27 @@ def purge(path: Path, table: str, row_id: str, cols: list[str] | None = None) ->
         if missing:
             raise ValueError(f"no such column: {table}.{missing[0]}")
     _ensure_purges(path)
-    written = 0
     with connect(path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         changes.track(conn)
         now = conn.execute(f"SELECT {NOW}").fetchone()[0]
-        for col in cols or [None]:
-            mid = json.dumps([table, row_id, col])
-            # Purging again moves the marker's time forward, so a copy re-imported
-            # since the last purge is covered too.
-            conn.execute(
-                f"INSERT INTO {PURGES} (id, tbl, row_id, col, purged_at) VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET purged_at = excluded.purged_at, deleted_at = NULL",
-                (mid, table, row_id, col, now),
-            )
-            written += 1
-        markers = conn.execute(
-            f"SELECT * FROM {PURGES} WHERE tbl = ? AND row_id = ?", (table, row_id)
+        markers = [
+            (json.dumps([table, rid, col]), table, rid, col, now)
+            for rid in row_ids
+            for col in cols or [None]
+        ]
+        # Purging again moves the cutoff forward to cover a later re-import.
+        conn.executemany(
+            f"INSERT INTO {PURGES} (id, tbl, row_id, col, purged_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET purged_at = excluded.purged_at, deleted_at = NULL",
+            markers,
+        )
+        existing = conn.execute(
+            f"SELECT * FROM {PURGES} WHERE tbl = ? AND row_id IN (SELECT value FROM json_each(?))",
+            (table, json.dumps(row_ids)),
         ).fetchall()
-        apply_purges(conn, [dict(m) for m in markers])
-    return {"markers": written}
+        apply_purges(conn, [dict(m) for m in existing])
+    return {"markers": len(markers)}
 
 
 class LocalHub:
@@ -1854,10 +1863,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     bg_run.add_argument("--poll", type=int, default=POLL_SECONDS)
     p_purge = sub.add_parser(
-        "purge", help="hard-delete a row, or a column's history, here and on every replica"
+        "purge", help="hard-delete rows, or column history, here and on every replica"
     )
     p_purge.add_argument("table")
-    p_purge.add_argument("id", help="the row id")
+    p_purge.add_argument("id", nargs="+", help="one or more row ids")
     p_purge.add_argument(
         "--col", action="append", help="purge only this column's history (repeatable)"
     )

@@ -183,9 +183,16 @@ row and the `history` table both keep the old text), use `soma purge`:
 
 ```bash
 soma purge notes 3f2a...                 # the row, its history and provenance edges
+soma purge notes 3f2a... 7b4c...         # multiple rows in one transaction
 soma sql "UPDATE notes SET body = '[redacted]' WHERE id = '3f2a...'"
 soma purge notes 3f2a... --col body      # only the old values of one column
 ```
+
+One invocation accepts one or more IDs from the same table, checks the whole
+request before writing markers, and commits all markers and cleanup together.
+Duplicate IDs are counted once; `--col` applies to every ID. Absent rows remain
+valid targets, so markers can prevent stale copies from returning. Initial
+purge-table setup remains separate from the cleanup transaction.
 
 A purge writes a marker to the `purges` table naming the table, row and
 column, never the content. The marker syncs like a row: the hub and every
