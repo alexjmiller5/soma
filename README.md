@@ -105,6 +105,17 @@ for a lost device with a usable browser session, the service operator must also
 revoke that identity's Access sessions and secure the email account. The hosted
 service currently admits one owner and one dataset; it is not multi-user signup.
 
+With background sync enabled and its runner active, `soma sync` requests a fresh
+round from that runner and waits up to 60 seconds for its result. This works
+from SSH even when the caller cannot unlock the login Keychain. Credentials
+stay in the runner; only a request ID, sync statistics and sanitized failures
+cross the local, private request files. Concurrent callers are serialized.
+Timeouts report failure; a round already in progress may still finish.
+Explicit `SOMA_HUB_TOKEN` or `SOMA_HUB_URL` overrides use direct sync instead.
+Without an enabled, active runner, sync uses the caller's credentials as usual.
+After upgrading, restart the supervised runner before requesting delegated sync.
+Replacement machines still enroll independently with `soma login`.
+
 Keychain may require foreground macOS approval. Background reads never prompt:
 if access requires interaction, the runner reports a sanitized OS error and
 retries. Unlocking the screen and allowing the executable to read the Keychain

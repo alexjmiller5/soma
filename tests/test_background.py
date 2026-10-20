@@ -205,6 +205,7 @@ def test_rejected_rows_are_not_a_success_and_do_not_leak(tmp_path, monkeypatch):
     from soma import background
 
     background.write_json(tmp_path / "background.json", {"enabled": True})
+    background.write_json(tmp_path / "sync-request.json", {"id": "test-request"})
     monkeypatch.setenv("SOMA_HUB_TOKEN", "test-credential")
     monkeypatch.setattr(soma, "hub_from_config", lambda _: object())
     monkeypatch.setattr(
@@ -227,6 +228,10 @@ def test_rejected_rows_are_not_a_success_and_do_not_leak(tmp_path, monkeypatch):
     assert report["last_error"] == "hub rejected rows"
     assert report["stats"]["rejected"] == 1
     assert "private" not in (tmp_path / "background-status.json").read_text()
+
+    receipt = background.read_json(tmp_path / "sync-result.json")
+    assert receipt["id"] == "test-request"
+    assert receipt["stats"]["rejected"] == [{"id": "private-row", "error": "private-detail"}]
 
 
 def test_rejected_rows_are_summarized_in_the_log_without_ids_or_messages(
@@ -787,3 +792,156 @@ def test_stdin_preference_failure_restores_native_item_or_reports_rollback_failu
     else:
         assert native_lifecycle.tokens == before_tokens
         assert "install" in output.err
+
+
+@pytest.fixture
+def delegated_runner(tmp_path):
+    """A real daemon has a credential that the CLI's environment cannot read."""
+    data = tmp_path / "client"
+    data.mkdir()
+    server = _serve(tmp_path / "hub.db")
+    (data / "config.json").write_text(
+        json.dumps(
+            {
+                "hub_url": f"http://127.0.0.1:{server.server_port}",
+                "token_cmd": "exit 99",
+            }
+        )
+    )
+    assert cli(data, "init").returncode == 0
+    assert cli(data, "background", "enable", "--token-command", "printf testtoken").returncode == 0
+    env = {
+        **os.environ,
+        "SOMA_DATA_DIR": str(data),
+        "PYTHONPATH": os.environ.get("SOMA_TEST_SRC", str(Path("src").resolve())),
+    }
+    env.pop("SOMA_HUB_TOKEN", None)
+    env.pop("SOMA_HUB_URL", None)
+    runner = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from soma import main; raise SystemExit(main())",
+            "background",
+            "run",
+            "--poll",
+            "3600",
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        wait_for(lambda: json.loads(cli(data, "background", "status").stdout).get("last_success"))
+        yield data, server, runner
+    finally:
+        runner.terminate()
+        runner.communicate(timeout=5)
+        server.shutdown()
+
+
+def test_sync_cli_uses_daemon_without_reading_interactive_credentials(delegated_runner):
+    # Removing delegation makes this hit the intentionally broken token command.
+    data, _, _ = delegated_runner
+    before = json.loads(cli(data, "background", "status").stdout)["last_success"]
+    result = cli(data, "sync")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["rejected"] == []
+    assert json.loads(cli(data, "background", "status").stdout)["last_success"] > before
+    assert "testtoken" not in result.stdout + result.stderr
+    assert not (data / "sync-request.json").exists()
+
+
+def test_daemon_sync_failure_is_returned_without_credentials(delegated_runner):
+    # A daemon failure must not turn into stale success or a CLI credential fallback.
+    data, _, _ = delegated_runner
+    prefs_path = data / "background.json"
+    prefs = json.loads(prefs_path.read_text())
+    prefs["token_cmd"] = "printf private-invalid-token"
+    from soma.background import write_json
+
+    write_json(prefs_path, prefs)
+    result = cli(data, "sync")
+    assert result.returncode == 1
+    assert "HTTP 403" in result.stderr
+    assert "private-invalid-token" not in result.stdout + result.stderr
+
+
+def test_sync_request_times_out_and_removes_request(delegated_runner, monkeypatch):
+    # An unresponsive daemon must not hang a foreground caller indefinitely.
+    import signal
+
+    from soma import background
+
+    data, _, runner = delegated_runner
+    write = background.write_json
+
+    def pause_after_request(path, value):
+        runner.send_signal(signal.SIGSTOP)
+        write(path, value)
+
+    monkeypatch.setattr(background, "write_json", pause_after_request)
+    try:
+        with pytest.raises(ValueError, match="timed out"):
+            background.request_sync(data, timeout=0.2)
+        assert not (data / "sync-request.json").exists()
+    finally:
+        runner.send_signal(signal.SIGCONT)
+
+
+def test_concurrent_sync_callers_each_get_a_fresh_result(delegated_runner):
+    # Without the client lock one caller can consume another caller's receipt.
+    from concurrent.futures import ThreadPoolExecutor
+
+    data, _, _ = delegated_runner
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: cli(data, "sync"), range(2)))
+    assert all(r.returncode == 0 for r in results), [r.stderr for r in results]
+    assert all(json.loads(r.stdout)["rejected"] == [] for r in results)
+
+
+def test_explicit_credentials_do_not_use_another_daemon_session(delegated_runner, monkeypatch):
+    from soma.background import request_sync
+
+    data, _, _ = delegated_runner
+    monkeypatch.setenv("SOMA_HUB_TOKEN", "explicit-token")
+    assert request_sync(data) is None
+    monkeypatch.delenv("SOMA_HUB_TOKEN")
+    monkeypatch.setenv("SOMA_HUB_URL", "https://different.example")
+    assert request_sync(data) is None
+
+
+def test_old_daemon_requires_restart_instead_of_hanging(delegated_runner):
+
+    from soma import background
+
+    data, _, _ = delegated_runner
+    # Leave the lock held but stop publishing the protocol marker, as an old runner does.
+    path = data / "background-status.json"
+    state = json.loads(path.read_text())
+    state.pop("sync_requests")
+    background.write_json(path, state)
+    with pytest.raises(ValueError, match="restart"):
+        background.request_sync(data, timeout=0.2)
+    assert not (data / "sync-request.json").exists()
+
+
+def test_sync_cli_rejected_rows_exit_nonzero(tmp_path, monkeypatch, capsys):
+    import soma
+
+    monkeypatch.setenv("SOMA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("SOMA_HUB_TOKEN", "test-credential")
+    monkeypatch.setattr(soma, "hub_from_config", lambda: object())
+    monkeypatch.setattr(
+        soma,
+        "sync",
+        lambda *_: {
+            "pushed": 0,
+            "pulled": 0,
+            "ddl_applied": 0,
+            "rejected": [{"id": "row", "rule": "type"}],
+        },
+    )
+    assert soma.main(["sync"]) == 1
+    assert json.loads(capsys.readouterr().err)["rejected"] == [{"id": "row", "rule": "type"}]

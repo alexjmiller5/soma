@@ -2088,10 +2088,15 @@ def _dispatch(args: argparse.Namespace, path: Path) -> int:
     elif args.command == "purge":
         print(json.dumps(purge(path, args.table, args.id, args.col)))
     elif args.command == "sync":
-        stats = sync(path, hub_from_config())
+        from .background import request_sync
+
+        stats = request_sync(path.parent)
+        if stats is None:
+            stats = sync(path, hub_from_config())
         print(json.dumps(stats))
         if stats["rejected"]:
             print(json.dumps({"rejected": stats["rejected"]}, indent=2), file=sys.stderr)
+            return 1
     elif args.command == "check":
         findings = catalog.check(path, as_of=args.as_of)
         print(json.dumps(findings, indent=2))

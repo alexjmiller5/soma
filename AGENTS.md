@@ -60,6 +60,10 @@ reads never provision either store or rewrite saved definitions.
 
 - `src/soma/__init__.py` - CLI, sync engine and hubs.
 - `src/soma/background.py` - persistent CLI toggle, status and supervised loop.
+  `soma sync` delegates a fresh round to an enabled, active runner through
+  private request/result files, with serialized callers and a 60-second timeout.
+  Explicit endpoint or token environment overrides retain direct sync.
+  No credential crosses this local interface.
 - `src/soma/credentials.py` - native macOS Keychain storage; stdlib only.
 - `src/soma/legacy.py` - adopts a pre-rename install on first use: the old
   `<data home>/life-data` dir (`life.db` -> `soma.db`, files already in the new dir

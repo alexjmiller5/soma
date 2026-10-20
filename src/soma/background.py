@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import uuid
 from collections import Counter
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -138,6 +139,51 @@ def status(data: Path) -> dict:
         "last_attempt": current.get("last_attempt"),
         "stats": current.get("stats"),
     }
+
+
+def request_sync(data: Path, *, timeout: float = 60) -> dict | None:
+    """Ask the enabled runner for a fresh round, without reading its credential."""
+    if os.environ.get("SOMA_HUB_TOKEN") or os.environ.get("SOMA_HUB_URL"):
+        return None
+    current = status(data)
+    if not current["enabled"] or not current["running"]:
+        return None
+    if read_json(data / "background-status.json").get("sync_requests") != 1:
+        raise ValueError("restart the background sync runner to enable delegated sync")
+    deadline = time.monotonic() + timeout
+    request_id = uuid.uuid4().hex
+    request = data / "sync-request.json"
+    result = data / "sync-result.json"
+    fd = os.open(data / "sync-request.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(fd, "r+") as lock:
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise ValueError("timed out waiting for background sync") from None
+                time.sleep(0.1)
+        try:
+            write_json(request, {"id": request_id})
+            while time.monotonic() < deadline:
+                reply = read_json(result)
+                if reply.get("id") == request_id:
+                    if reply.get("error"):
+                        raise ValueError("background sync failed: " + reply["error"])
+                    return reply["stats"]
+                time.sleep(0.1)
+            raise ValueError("timed out waiting for background sync; the runner may still finish")
+        finally:
+            request.unlink(missing_ok=True)
+            result.unlink(missing_ok=True)
+
+
+def _sync_request(data: Path) -> str | None:
+    request_id = read_json(data / "sync-request.json").get("id")
+    if request_id and read_json(data / "sync-result.json").get("id") != request_id:
+        return request_id
+    return None
 
 
 def command(args, data: Path) -> int:
@@ -270,6 +316,7 @@ def run(data: Path, poll_seconds: int) -> int:
         lock.write(str(os.getpid()))
         lock.flush()
         current = read_json(data / "background-status.json")
+        current["sync_requests"] = 1
         saved_status = None
         path = data / "soma.db"
         hub = None
@@ -281,7 +328,9 @@ def run(data: Path, poll_seconds: int) -> int:
         again = False  # a write landed while the last round ran
         retry = RETRY_FIRST
         while True:
+            request_id = None
             try:
+                request_id = _sync_request(data)
                 if remote is not None and listening is not hub:
                     remote.stop()
                     remote = None
@@ -292,6 +341,8 @@ def run(data: Path, poll_seconds: int) -> int:
                     next_sync = 0.0
                     retry = RETRY_FIRST
                     current["state"] = "disabled"
+                    if request_id:
+                        raise RuntimeError("background sync is disabled")
                 else:
                     cfg = load_config(data, resolve_auth=False)
                     signature = (cfg, prefs)
@@ -308,7 +359,7 @@ def run(data: Path, poll_seconds: int) -> int:
                     else:
                         due = time.monotonic() >= next_sync
                     signalled = remote is not None and remote.take()
-                    if due or ((changed or signalled or again) and hub and idle):
+                    if request_id or due or ((changed or signalled or again) and hub and idle):
                         again = False
                         current.update(
                             state="authenticating" if hub is None else "syncing",
@@ -352,6 +403,10 @@ def run(data: Path, poll_seconds: int) -> int:
                         retry = RETRY_FIRST
                         last_round = time.monotonic()
                         next_sync = last_round + poll_seconds
+                        if request_id:
+                            write_json(
+                                data / "sync-result.json", {"id": request_id, "stats": stats}
+                            )
             except Exception as exc:  # noqa: BLE001 - stay alive through outages
                 # Exception messages/remote bodies can contain credentials or data.
                 http_error = exc if isinstance(exc, urllib.error.HTTPError) else exc.__cause__
@@ -369,6 +424,7 @@ def run(data: Path, poll_seconds: int) -> int:
                         "credential command failed",
                         "credential command returned an invalid token",
                         "hub rejected rows",
+                        "background sync is disabled",
                     }
                     or isinstance(exc, ValueError)
                     and str(exc).startswith("hub changed;")
@@ -376,6 +432,13 @@ def run(data: Path, poll_seconds: int) -> int:
                     error = str(exc)
                 else:
                     error = type(exc).__name__
+                if request_id:
+                    write_json(
+                        data / "sync-result.json",
+                        {"id": request_id, "stats": stats}
+                        if error == "hub rejected rows"
+                        else {"id": request_id, "error": error},
+                    )
                 current.update(state="retrying", last_error=error)
                 # A server failure's own words (bounded) go to the daemon log only;
                 # the status file keeps the redacted class above.
