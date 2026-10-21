@@ -530,6 +530,26 @@ def test_transition_rule_uses_before_and_changed(db):
         execute_sql(db, "UPDATE places SET status = 'want' WHERE id = 'x'")
 
 
+def test_check_treats_existing_rows_as_unchanged_for_transition_rules(db):
+    create_table(db, "items", ["name:text"])
+    insert_rows(db, "items", [{"id": "existing", "name": "Kept"}])
+    set_rule(
+        db,
+        "no-new-items",
+        scope="table",
+        tbl="items",
+        kind="invariant",
+        enforce=1,
+        text="New items are closed.",
+        sql="SELECT c.id FROM changed c WHERE NOT EXISTS (SELECT 1 FROM before b WHERE b.id=c.id)",
+    )
+    assert check(db) == []
+    execute_sql(db, "UPDATE items SET name='Edited' WHERE id='existing'")
+    with pytest.raises(ValidationError, match="New items are closed"):
+        insert_rows(db, "items", [{"id": "new", "name": "Rejected"}])
+    assert check(db) == []
+
+
 def test_now_is_injected_not_read(db):
     create_table(db, "tasks", ["due:text"])
     set_property(db, "tasks", "due", type="date")

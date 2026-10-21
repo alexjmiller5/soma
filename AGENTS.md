@@ -79,7 +79,9 @@ reads never provision either store or rewrite saved definitions.
 - `src/soma/login.py` - browser enrollment and device-token lifecycle.
 - `src/soma/catalog.py` - the catalog engine: typed properties, rules,
   derivations, provenance, check/audit/infer/doc. Pure over a sqlite3
-  connection.
+  connection. Whole-estate invariant checks expose current rows as both
+  `before` and `changed`; write validation supplies actual prior rows, with
+  empty prior state for inserts.
 - `src/soma/changes.py` - Python's local dirty-identity receipts. Temporary
   triggers exist only on supported local writer connections; no tracking trigger
   or receipt schema is logged or shipped to the hub or shared core.

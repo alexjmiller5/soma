@@ -1249,7 +1249,11 @@ def _with_context(conn, sql, changed_ids, now, tbl):
                 ids,
             )
         else:
-            conn.execute(f"CREATE TEMP TABLE temp.before AS SELECT * FROM main.{qi(tbl)} WHERE 0")
+            # A whole-estate check observes existing state, not fresh inserts.
+            predicate = "" if changed_ids is None else " WHERE 0"
+            conn.execute(
+                f"CREATE TEMP TABLE temp.before AS SELECT * FROM main.{qi(tbl)}{predicate}"
+            )
         made += ["changed", "before"]
 
     def cleanup():
