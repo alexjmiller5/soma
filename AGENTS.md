@@ -1099,8 +1099,9 @@ deleted - everything downstream is rebuildable from landing) plus a
 The tee must NEVER fail the append - landing is the source of truth.
 
 Exact `streams:append:<name>` and `streams:read:<name>` grants are independent.
-Append grants authorize only append; read grants authorize tail and bounded
-`records` pages, never manifest, arbitrary files, SQL, tables, batch or replay.
+Append grants authorize POST append and batch (1..1000 records); batch keeps
+the live tail unchanged. Read grants authorize GET tail and bounded `records`
+pages. Neither grant authorizes manifest, arbitrary files, SQL, tables or replay.
 `docs/scoped-streams.md` defines cursor and byte limits. Separate landing pages
 are not source-time incrementals, a snapshot or per-person latest state.
 
@@ -1186,14 +1187,6 @@ projection adds each granted column's static default (never a `sql:` one) and
 the table's enforced rule texts, and never executes or discloses dynamic option,
 default or rule SQL. These endpoints
 confer no replica, arbitrary SQL or general catalog authority.
-
-## Stream authorization
-
-Exact `streams:append:<name>` authorizes POST append and batch import for that
-stream. Batch imports keep the live tail unchanged and accept 1..1000 records.
-Exact readers retain only GET tail/records; neither grant permits replay or
-arbitrary archive SQL. Authorization is shared in `worker/src/index.js` and
-covered end to end through the auth registry in `worker/test/streams.test.js`.
 
 ## File service
 
