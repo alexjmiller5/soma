@@ -172,10 +172,10 @@ function allowed(pathname, method, scopes) {
   if (pathname === "/v1/backup") return scopes.includes("full");
   if (pathname === "/v1/backups" || pathname.startsWith("/v1/backups/")) return backupsAllowed(pathname, method, scopes);
   if (pathname.startsWith('/v1/streams/')) {
-    const route = /^\/v1\/streams\/([A-Za-z0-9_-]{1,64})\/(append|tail|records)$/.exec(pathname);
+    const route = /^\/v1\/streams\/([A-Za-z0-9_-]{1,64})\/(append|batch|tail|records)$/.exec(pathname);
     if (route) {
       const [, stream, op] = route;
-      if (method === 'POST' && op === 'append' && scopes.includes(`streams:append:${stream}`)) return true;
+      if (method === 'POST' && ['append','batch'].includes(op) && scopes.includes(`streams:append:${stream}`)) return true;
       if (method === 'GET' && ['tail','records'].includes(op) && scopes.includes(`streams:read:${stream}`)) return true;
     }
   }

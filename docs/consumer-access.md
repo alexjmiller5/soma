@@ -4,6 +4,14 @@ How anything other than the owner's own `soma` CLI and Iris reaches a Soma
 Data hub. The grant grammar and the enrollment protocol are in
 [scoped-enrollment.md](scoped-enrollment.md); this is the policy for using them.
 
+Exact `streams:append:<name>` grants authorize POST to both
+`/v1/streams/<name>/append` and `/v1/streams/<name>/batch` (1..1000 records).
+Batch imports retain historical records without changing the live tail. These
+grants do not authorize reads, replay, other streams or arbitrary archive queries.
+Exact `streams:read:<name>` grants authorize GET `tail` and bounded, paginated
+`records` reads only. Consumers needing aggregates must read their authorized
+records and aggregate locally, rather than requesting general archive access.
+
 ## Rules
 
 - **One credential per (caller, service) pair.** Each consumer holds a Soma

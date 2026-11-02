@@ -43,7 +43,9 @@ test('exact producer append is independent from reads and forbidden mutation rou
   calls.length=0;
   for (const [path,method,body] of [
     ['/v1/streams/sample/tail','GET'], ['/v1/streams/sample/records','GET'],
-    ['/v1/streams/sample/batch','POST','[{}]'], ['/v1/streams/sample/replay','POST','[{}]'],
+    ['/v1/streams/sample-other/batch','POST','[{}]'], ['/v1/streams/sample/replay','POST','[{}]'],
+    ['/v1/streams/sample/batch','GET'], ['/v1/streams/%73ample/batch','POST','[{}]'],
+    ['/v1/streams/sample/batch/extra','POST','[{}]'], ['/v1/streams/sample%2fother/batch','POST','[{}]'],
     ['/v1/streams/sample-other/append','POST','{}'], ['/v1/streams/sample/append','GET'],
     ['/v1/streams/sample/append/extra','POST','{}'], ['/v1/streams/%73ample/append','POST','{}'],
     ['/v1/streams/sample%2fother/append','POST','{}'], ['/v1/streams/sample/manifest','GET'],
@@ -51,6 +53,35 @@ test('exact producer append is independent from reads and forbidden mutation rou
     ['/v1/rows/pull','POST','{"table":"sample"}'], ['/v1/tokens/list','POST','{}'],
   ]) expect((await request(token,path,method,body)).status).toBe(403);
   expect(calls).toEqual([]);
+});
+
+test('exact producer imports bounded batches without changing the live tail',async()=>{
+  const {request,mint,objects,env} = await setup();
+  const token=await mint('producer','streams:append:sample');
+  const sent=[];
+  env.EVENTS={async send(events){sent.push(...events);}};
+  const live='{"tst":999}';
+  expect((await request(token,'/v1/streams/sample/append','POST',live)).status).toBe(200);
+  sent.length=0;
+  const records=Array.from({length:1000},(_,tst)=>({tst}));
+  const response=await request(token,'/v1/streams/sample/batch','POST',JSON.stringify(records));
+  expect(response.status).toBe(200);
+  const result=await response.json();
+  expect(result.count).toBe(1000);
+  expect(result.key).toStartWith('landing/sample/');
+  expect(JSON.parse(new TextDecoder().decode(objects.get(result.key)))).toEqual(records);
+  expect(new TextDecoder().decode(objects.get('state/sample/latest.json'))).toBe(live);
+  expect(sent.map(e=>e.record)).toEqual(records);
+  expect(sent.every(e=>e.stream==='sample' && e.ingested_at===sent[0].ingested_at)).toBe(true);
+  const size=objects.size;
+  for(const body of ['[]','{}',JSON.stringify([...records,{}])]) {
+    expect((await request(token,'/v1/streams/sample/batch','POST',body)).status).toBe(400);
+    expect(objects.size).toBe(size);
+    expect(sent.length).toBe(1000);
+  }
+  expect((await request('root','/v1/tokens/revoke','POST','{"name":"producer"}')).status).toBe(200);
+  expect((await request(token,'/v1/streams/sample/batch','POST','[{}]')).status).toBe(403);
+  expect(objects.size).toBe(size);
 });
 
 test('reader walks only its stream and preserves exact bodies including batches',async()=>{
@@ -72,7 +103,8 @@ test('reader walks only its stream and preserves exact bodies including batches'
   expect((await (await request(token,'/v1/streams/sample/records?limit=1')).json()).entries[0].id).toBe(page.entries[0].id);
   for (const [path,method,body] of [
     ['/v1/streams/other/records','GET'], ['/v1/streams/sample-other/tail','GET'],
-    ['/v1/streams/sample/append','POST','{}'], ['/v1/streams/sample/replay','POST','[{}]'],
+    ['/v1/streams/sample/append','POST','{}'], ['/v1/streams/sample/batch','POST','[{}]'],
+    ['/v1/streams/sample/replay','POST','[{}]'],
     ['/v1/streams/sample/manifest','GET'], ['/v1/files/landing/sample/a.json','GET'],
     ['/v1/streams/sample/records','POST','{}'],
   ]) expect((await request(token,path,method,body)).status).toBe(403);

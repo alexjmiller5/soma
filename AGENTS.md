@@ -1187,6 +1187,14 @@ the table's enforced rule texts, and never executes or discloses dynamic option,
 default or rule SQL. These endpoints
 confer no replica, arbitrary SQL or general catalog authority.
 
+## Stream authorization
+
+Exact `streams:append:<name>` authorizes POST append and batch import for that
+stream. Batch imports keep the live tail unchanged and accept 1..1000 records.
+Exact readers retain only GET tail/records; neither grant permits replay or
+arbitrary archive SQL. Authorization is shared in `worker/src/index.js` and
+covered end to end through the auth registry in `worker/test/streams.test.js`.
+
 ## File service
 
 `PUT/GET/HEAD /v1/files/<key>` serves retained originals through the hub's
@@ -1258,7 +1266,7 @@ consumer reads them, never in this repo.
 | Birthdays, Circle, Strava Sync | profiles `birthdays-reader-v1`, `birthdays-editor-v1`, `circle-reader`, `strava-sync-v1` | each app's own storage |
 | Flighty Sync, Page Archiver, Shared Album Reminders, Media Center YouTube offline, Bookmark Mirror, Calendar Feeds, OwnTracks phone, People Sync files | pattern C exact operator tokens (`flighty-sync`, Page Archiver's, `shared-album-reminders-mini-v2`, `media-center-youtube-offline`, `bookmark-mirror-macbook`, `calendar-feeds-*` (minted by its `scripts/provision.py`), `phone`, `people-sync-files`); each moves to a profile at its next rotation | each consumer's native secure storage or settings |
 | soma CLI replicas (one per Mac), Iris (one per device) | browser device enrollment (`soma login`), `full` | device Keychain |
-| People Sync communication import | operator token `people-sync-comm` (`full`: `/batch` and `archive query` admit only `full`) | People Sync operator env |
+| People Sync communication import | operator token `people-sync-comm` (`full`: its current refresh uses arbitrary archive SQL) | People Sync operator env |
 | Find My friend-location collector | exact operator token `friend-location-collector` (`streams:append:friend_city_checks`) | the mini's login Keychain |
 
 ## Durable change recording
