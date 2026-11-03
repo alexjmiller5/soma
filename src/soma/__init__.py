@@ -138,7 +138,7 @@ def execute_sql(path: Path, sql: str) -> list[dict]:
             conn.execute("INSERT INTO _schema_log (ddl) VALUES (?)", (sql,))
         return rows
 
-    return catalog.write(path, run, ddl=_first_word(sql) in DDL_KEYWORDS)
+    return catalog.write(path, run, ddl=_first_word(sql) in DDL_KEYWORDS, statement=sql)
 
 
 def insert_rows(path: Path, table: str, rows: list[dict]) -> int:

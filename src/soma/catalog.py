@@ -749,7 +749,31 @@ def _validated_tables(conn: sqlite3.Connection) -> list[str]:
     return sorted(named - (ENGINE_TABLES - {"catalog_properties"}))
 
 
-def write(path: Path, fn, *, ddl: bool = False):
+def _statement_write_tables(conn: sqlite3.Connection, statement: str) -> set[str] | None:
+    """Compile known DML without running it; include SQLite's trigger/FK writes."""
+    if _first(statement) not in {"INSERT", "UPDATE", "DELETE", "REPLACE", "WITH"}:
+        return None
+    targets: set[str] = set()
+
+    def observe(action, table, column, database, trigger):
+        if (
+            action in {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE}
+            and database == "main"
+        ):
+            targets.add(table)
+        return sqlite3.SQLITE_OK
+
+    conn.set_authorizer(observe)
+    try:
+        conn.execute("EXPLAIN " + statement).fetchall()
+        return None if targets & set(CATALOG_TABLES) else targets
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.set_authorizer(None)
+
+
+def write(path: Path, fn, *, ddl: bool = False, statement: str | None = None):
     """Run fn(conn) in one transaction; validate every changed row in every
     cataloged table; ROLLBACK and raise ValidationError on any violation."""
     pkg = _pkg()
@@ -766,6 +790,11 @@ def write(path: Path, fn, *, ddl: bool = False):
                 conn.execute("INSERT INTO _schema_log (ddl) VALUES (?)", (stmt,))
         t0 = conn.execute(f"SELECT {pkg.NOW}").fetchone()[0]
         pkg.changes.track(conn)
+        targets = None
+        if statement is not None and not ddl:
+            targets = _statement_write_tables(conn, statement)
+            if targets is not None:
+                tables = [t for t in tables if t in targets]
         marks = {}
         for t in tables:
             # ponytail: whole-table snapshot per write; scope by rowid past ~1M rows
@@ -774,8 +803,22 @@ def write(path: Path, fn, *, ddl: bool = False):
                 f"SELECT rowid AS _rowid, * FROM {qi(t)}"
             )
             marks[t] = conn.execute(f"SELECT coalesce(max(rowid), 0) FROM {qi(t)}").fetchone()[0]
+
+        def guard(action, table, column, database, trigger):
+            if action in {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE} and (
+                database != "main" or table not in targets
+            ):
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
         try:
-            result = fn(conn)
+            if targets is not None:
+                conn.set_authorizer(guard)
+            try:
+                result = fn(conn)
+            finally:
+                if targets is not None:
+                    conn.set_authorizer(None)
             violations, changes = _validate_changed(conn, marks, t0)
             if ddl:
                 for rid in compile_all(conn):

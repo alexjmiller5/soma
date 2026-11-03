@@ -424,6 +424,11 @@ reads never provision either store or rewrite saved definitions.
   before catalog reads and validation snapshots, so another writer cannot
   invalidate the snapshot before its first mutation. Connections wait up to
   60 seconds for a competing writer, including bulk sync transactions.
+  Known SQL DML compiles under a SQLite authorizer before mutation to discover
+  direct, trigger and foreign-key write targets; only those tables need before
+  snapshots. A runtime authorizer rejects undeclared main or temporary writes.
+  Unknown statements, compilation failures, catalog writes and arbitrary callbacks
+  retain full snapshots. Validation still reads all referenced rule dependencies.
   **Changed rows come from the per-table `temp._before_<t>`
   snapshot diff, never a timestamp comparison** - a clock collision at
   millisecond resolution cuts both ways (an untouched legacy row looks
