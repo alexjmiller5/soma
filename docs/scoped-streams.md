@@ -8,7 +8,8 @@ bytes, preserving the live tail);
 Names use the existing literal stream-name grammar. Neither grant permits
 replay, manifest, arbitrary files, SQL, tables or token management. Read-only
 grants never authorize append or batch import.
-Oversized exact-producer batches return 413 before storage or pipeline writes.
+Exact-producer batches require valid UTF-8 JSON. Malformed bytes or JSON return
+400 before storage or pipeline writes; oversized bodies return 413.
 Full/admin imports retain their existing record-count-only body contract.
 Existing broad grants retain their existing behavior.
 

@@ -118,6 +118,52 @@ test('a chunked exact batch stops and cancels once its body exceeds the byte bou
   expect(objects.size).toBe(0);
 });
 
+test('exact batches reject malformed UTF-8 without storage or pipeline effects',async()=>{
+  const {request,mint,objects,env}=await setup();
+  const token=await mint('producer','streams:append:sample');
+  const sent=[];
+  env.EVENTS={async send(events){sent.push(...events);}};
+  const live='{"tst":999}';
+  expect((await request(token,'/v1/streams/sample/append','POST',live)).status).toBe(200);
+  sent.length=0;
+  const size=objects.size;
+  for(const invalid of [[255],[0xc3],[0xc0,0xaf],[0xed,0xa0,0x80],[0xf4,0x90,0x80,0x80]]) {
+    const body=new Uint8Array([91,34,...invalid,34,93]);
+    expect((await request(token,'/v1/streams/sample/batch','POST',body)).status).toBe(400);
+    expect(objects.size).toBe(size);
+    expect(sent).toEqual([]);
+    expect(new TextDecoder().decode(objects.get('state/sample/latest.json'))).toBe(live);
+  }
+});
+
+test('exact batches preserve valid Unicode split across chunks, including literal replacement characters',async()=>{
+  const {request,mint,objects,env}=await setup();
+  const token=await mint('producer','streams:append:sample');
+  const sent=[];
+  env.EVENTS={async send(events){sent.push(...events);}};
+  const records=[{value:'é \u{1d11e} \uFFFD'}],bytes=new TextEncoder().encode(JSON.stringify(records));
+  const body=new ReadableStream({start(controller){
+    for(const byte of bytes)controller.enqueue(new Uint8Array([byte]));
+    controller.close();
+  }});
+  const response=await request(token,'/v1/streams/sample/batch','POST',body);
+  expect(response.status).toBe(200);
+  const {key}=await response.json();
+  expect(JSON.parse(new TextDecoder().decode(objects.get(key)))).toEqual(records);
+  expect(sent.map(e=>e.record)).toEqual(records);
+});
+
+test('full and admin batch imports retain their legacy body decoding',async()=>{
+  const {request,mint,env}=await setup();
+  const full=await mint('importer','full'),sent=[];
+  env.EVENTS={async send(events){sent.push(...events);}};
+  for(const token of ['root',full]) {
+    const body=new Uint8Array([91,34,255,34,93]);
+    expect((await request(token,'/v1/streams/sample/batch','POST',body)).status).toBe(200);
+  }
+  expect(sent.map(e=>e.record)).toEqual(['\uFFFD','\uFFFD']);
+});
+
 test('reader walks only its stream and preserves exact bodies including batches',async()=>{
   const {request,mint,add} = await setup();
   const token = await mint('reader','streams:read:sample');

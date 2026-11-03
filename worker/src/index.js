@@ -962,8 +962,10 @@ async function handleStreams(request, env, url, scopes) {
           chunks.push(value);
         }
       } finally { reader?.releaseLock(); }
-      try { records = await new Response(new Blob(chunks)).json(); }
-      catch { return json({error:'body must be a JSON array of 1..1000 records'}, 400); }
+      try {
+        const body = await new Blob(chunks).arrayBuffer();
+        records = JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(body));
+      } catch { return json({error:'body must be a UTF-8 JSON array of 1..1000 records'}, 400); }
     }
     if (!Array.isArray(records) || records.length === 0 || records.length > 1000) {
       return json({ error: "body must be a JSON array of 1..1000 records" }, 400);

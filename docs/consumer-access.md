@@ -9,8 +9,8 @@ Exact `streams:append:<name>` grants authorize POST to both
 at most 1,000,000 UTF-8 body bytes).
 Batch imports retain historical records without changing the live tail. These
 grants do not authorize reads, replay, other streams or arbitrary archive queries.
-Oversized exact-producer batches return 413 before storage or pipeline writes;
-full/admin imports retain their existing record-count-only body contract.
+Malformed exact-producer UTF-8 or JSON returns 400; oversized batches return 413,
+both before storage or pipeline writes. Full/admin imports retain their existing record-count-only body contract.
 Exact `streams:read:<name>` grants authorize GET `tail` and bounded, paginated
 `records` reads only. Consumers needing aggregates must read their authorized
 records and aggregate locally, rather than requesting general archive access.
