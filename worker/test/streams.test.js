@@ -84,6 +84,40 @@ test('exact producer imports bounded batches without changing the live tail',asy
   expect(objects.size).toBe(size);
 });
 
+test('exact batch producers are byte-bounded while full imports keep their existing contract',async()=>{
+  const {request,mint,objects,env}=await setup();
+  const token=await mint('producer','streams:append:sample');
+  const sent=[];
+  env.EVENTS={async send(events){sent.push(...events);}};
+  const envelope=JSON.stringify([{p:''}]).length;
+  const atLimit=JSON.stringify([{p:'x'.repeat(1_000_000-envelope)}]);
+  expect(new TextEncoder().encode(atLimit).byteLength).toBe(1_000_000);
+  expect((await request(token,'/v1/streams/sample/batch','POST',atLimit)).status).toBe(200);
+  const count=objects.size;
+  for(const body of [atLimit+' ',JSON.stringify([{p:'é'.repeat(500_000)}])]) {
+    expect((await request(token,'/v1/streams/sample/batch','POST',body)).status).toBe(413);
+    expect(objects.size).toBe(count);
+    expect(sent.length).toBe(1);
+  }
+  const full=await mint('importer','full');
+  for(const broad of ['root',full]) {
+    expect((await request(broad,'/v1/streams/sample/batch','POST',atLimit+' ')).status).toBe(200);
+  }
+});
+
+test('a chunked exact batch stops and cancels once its body exceeds the byte bound',async()=>{
+  const {request,mint,objects}=await setup();
+  const token=await mint('producer','streams:append:sample');
+  let cancelled=false;
+  const body=new ReadableStream({
+    start(controller){controller.enqueue(new Uint8Array(1_000_001));},
+    cancel(){cancelled=true;},
+  });
+  expect((await request(token,'/v1/streams/sample/batch','POST',body)).status).toBe(413);
+  expect(cancelled).toBe(true);
+  expect(objects.size).toBe(0);
+});
+
 test('reader walks only its stream and preserves exact bodies including batches',async()=>{
   const {request,mint,add} = await setup();
   const token = await mint('reader','streams:read:sample');

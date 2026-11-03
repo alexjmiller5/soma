@@ -1099,8 +1099,8 @@ deleted - everything downstream is rebuildable from landing) plus a
 The tee must NEVER fail the append - landing is the source of truth.
 
 Exact `streams:append:<name>` and `streams:read:<name>` grants are independent.
-Append grants authorize POST append and batch (1..1000 records); batch keeps
-the live tail unchanged. Read grants authorize GET tail and bounded `records`
+Append grants authorize POST append and batch. Exact batch producers send
+1..1000 records within 1,000,000 UTF-8 body bytes; batch keeps the live tail unchanged. Read grants authorize GET tail and bounded `records`
 pages. Neither grant authorizes manifest, arbitrary files, SQL, tables or replay.
 `docs/scoped-streams.md` defines cursor and byte limits. Separate landing pages
 are not source-time incrementals, a snapshot or per-person latest state.

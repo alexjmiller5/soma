@@ -34,7 +34,8 @@ const missing: Cell = {kind:'text'};
 const mixed: Cell = {kind:'empty',value:'hidden'};
 function read(value: Cell): string { return value.kind==='text'?value.value:'empty'; }
 `);
-    const result=await runCommand([resolve(import.meta.dir,'../node_modules/.bin/tsc'),'--noEmit','--strict','--skipLibCheck',join(dir,'types.ts')],30_000);
+    // This standalone DTO fixture must not discover unrelated ambient packages.
+    const result=await runCommand([resolve(import.meta.dir,'../node_modules/.bin/tsc'),'--noEmit','--strict','--skipLibCheck','--typeRoots',dir,join(dir,'types.ts')],30_000);
     expect(result).toEqual({code:0,stdout:'',stderr:''});
   } finally { await rm(dir,{recursive:true,force:true}); }
 },45_000);

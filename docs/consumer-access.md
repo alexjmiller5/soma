@@ -5,9 +5,12 @@ Data hub. The grant grammar and the enrollment protocol are in
 [scoped-enrollment.md](scoped-enrollment.md); this is the policy for using them.
 
 Exact `streams:append:<name>` grants authorize POST to both
-`/v1/streams/<name>/append` and `/v1/streams/<name>/batch` (1..1000 records).
+`/v1/streams/<name>/append` and `/v1/streams/<name>/batch` (1..1000 records,
+at most 1,000,000 UTF-8 body bytes).
 Batch imports retain historical records without changing the live tail. These
 grants do not authorize reads, replay, other streams or arbitrary archive queries.
+Oversized exact-producer batches return 413 before storage or pipeline writes;
+full/admin imports retain their existing record-count-only body contract.
 Exact `streams:read:<name>` grants authorize GET `tail` and bounded, paginated
 `records` reads only. Consumers needing aggregates must read their authorized
 records and aggregate locally, rather than requesting general archive access.

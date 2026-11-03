@@ -2,11 +2,14 @@
 
 Exact grants keep producer and reader credentials independent:
 `streams:append:<name>` permits `POST /v1/streams/<name>/append` and
-`POST /v1/streams/<name>/batch` (1..1000 records, preserving the live tail);
+`POST /v1/streams/<name>/batch` (1..1000 records, at most 1,000,000 UTF-8 body
+bytes, preserving the live tail);
 `streams:read:<name>` permits only `GET .../tail` and `GET .../records`.
 Names use the existing literal stream-name grammar. Neither grant permits
 replay, manifest, arbitrary files, SQL, tables or token management. Read-only
 grants never authorize append or batch import.
+Oversized exact-producer batches return 413 before storage or pipeline writes.
+Full/admin imports retain their existing record-count-only body contract.
 Existing broad grants retain their existing behavior.
 
 Service-owned enrollment profiles may contain exact stream grants. Browser

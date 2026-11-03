@@ -904,7 +904,7 @@ async function streamRecords(env, stream, params) {
   } catch { return json({error:'stream page unavailable'},503); }
 }
 
-async function handleStreams(request, env, url) {
+async function handleStreams(request, env, url, scopes) {
   const parts = url.pathname.split("/").filter(Boolean); // v1 streams <name> <op>
   const [, , stream, op] = parts;
   if (parts.length !== 4 || !STREAM_NAME.test(stream ?? "")) return json({ error: "bad stream name" }, 400);
@@ -943,7 +943,28 @@ async function handleStreams(request, env, url) {
     // Bulk import: ONE landing object holding the whole batch, pipeline sends
     // in chunks, and — unlike append — the latest.json pointer is left alone,
     // so historical imports never masquerade as the current position.
-    const records = await request.json();
+    let records;
+    if (scopes.includes('admin') || scopes.includes('full')) {
+      records = await request.json();
+    } else {
+      // Exact producers keep append's body bound; do not buffer an unlimited stream.
+      const reader = request.body?.getReader(), chunks = [];
+      let bytes = 0;
+      try {
+        while (reader) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          bytes += value.byteLength;
+          if (bytes > MAX_APPEND_BYTES) {
+            await reader.cancel();
+            return json({error:'batch body exceeds 1MB'}, 413);
+          }
+          chunks.push(value);
+        }
+      } finally { reader?.releaseLock(); }
+      try { records = await new Response(new Blob(chunks)).json(); }
+      catch { return json({error:'body must be a JSON array of 1..1000 records'}, 400); }
+    }
     if (!Array.isArray(records) || records.length === 0 || records.length > 1000) {
       return json({ error: "body must be a JSON array of 1..1000 records" }, 400);
     }
@@ -1194,7 +1215,7 @@ async function handle(request, env, ctx, url) {
       return new Response(text, { headers: { "Content-Type": "application/json", ETag: etag } });
     }
     if (url.pathname === "/v1/backups" || url.pathname.startsWith("/v1/backups/")) return await handleBackups(request, env, url);
-    if (url.pathname.startsWith("/v1/streams/")) return await handleStreams(request, env, url);
+    if (url.pathname.startsWith("/v1/streams/")) return await handleStreams(request, env, url, tenant.scopes);
     if (url.pathname === "/v1/changes" && request.method === "GET") return await changesRoute(env, url, request);
     if (
       url.pathname.startsWith("/v1/archive/") &&
