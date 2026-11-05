@@ -18,6 +18,9 @@ CLOUDFLARE_ACCOUNT_ID=op://Soma/Soma CI Cloudflare Token/account-id
 APNS_CONFIG=op://Soma/Soma ENV/APNS_CONFIG
 APNS_PRIVATE_KEY=op://Soma/Soma ENV/APNS_PRIVATE_KEY
 
+# Exact browser origins allowed to read API responses, comma-separated.
+CORS_ORIGINS=op://Soma/Soma ENV/CORS_ORIGINS
+
 # Consumer-access policy (docs/consumer-access.md): JSON objects, {} when unused.
 # Deploy pushes them, so these fields are the declarative source of truth.
 ENROLLMENT_PROFILES=op://Soma/Soma ENV/ENROLLMENT_PROFILES

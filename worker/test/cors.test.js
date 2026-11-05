@@ -68,3 +68,14 @@ test('the browser can read Retry-After when a hub response asks it to wait', asy
   });
   expect(response.headers.get('Access-Control-Expose-Headers')?.split(',').map(s => s.trim())).toContain('Retry-After');
 });
+
+test('deployment delivers CORS origins from owning service configuration', async () => {
+  const config = Bun.JSONC.parse(await Bun.file(new URL('../wrangler.jsonc', import.meta.url)).text());
+  expect(config.vars).not.toHaveProperty('CORS_ORIGINS');
+  const manifest = await Bun.file(new URL('../../.env.tpl', import.meta.url)).text();
+  expect(manifest).toMatch(/^CORS_ORIGINS=op:\/\/Soma\/Soma ENV\/CORS_ORIGINS$/m);
+  const workflow = await Bun.file(new URL('../../.github/workflows/deploy.yml', import.meta.url)).text();
+  expect(workflow).toMatch(/^\s+CORS_ORIGINS: op:\/\/Soma\/Soma ENV\/CORS_ORIGINS$/m);
+  const names = JSON.parse(workflow.match(/const names=(\[[^\]]+\])/)[1]);
+  expect(names).toContain('CORS_ORIGINS');
+});

@@ -39,8 +39,6 @@
 		"ACCOUNT_ID": "1e69de15e5dc3dddea6db7b3ae8087bc",
 		"ARCHIVE_BUCKET": "soma-archive",
 		"LOGIN_ACCESS_AUD": "9f21efcb47f8b63e252f64e20c3df14a9e7372999de4bb1ed6a84599c46f9f29",
-		// Browser apps allowed to call /v1 (comma-separated exact origins).
-		"CORS_ORIGINS": "https://iris.nqipomyrjb.workers.dev",
 		// What the backup cron exports through D1's export API (src/backup.js):
 		// backup object name -> database_id of a d1_databases entry above.
 		"BACKUP_DATABASES": {
