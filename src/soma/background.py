@@ -309,8 +309,13 @@ def run(data: Path, poll_seconds: int) -> int:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            print("background sync is already running", file=sys.stderr)
-            return 1
+            # A status probe briefly reserves this lock without owning a runner.
+            time.sleep(0.05)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print("background sync is already running", file=sys.stderr)
+                return 1
         lock.seek(0)
         lock.truncate()
         lock.write(str(os.getpid()))

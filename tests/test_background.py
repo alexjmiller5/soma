@@ -945,3 +945,53 @@ def test_sync_cli_rejected_rows_exit_nonzero(tmp_path, monkeypatch, capsys):
     )
     assert soma.main(["sync"]) == 1
     assert json.loads(capsys.readouterr().err)["rejected"] == [{"id": "row", "rule": "type"}]
+
+
+def test_runner_start_survives_a_status_probe_lock(tmp_path):
+    """A status probe briefly takes the same lock without owning a runner."""
+    import fcntl
+
+    marker = tmp_path / "contended"
+    released = tmp_path / "released"
+    script = """
+import sys,time
+from pathlib import Path
+from soma import background
+original=background.fcntl.flock
+marker,released=map(Path,sys.argv[2:])
+def observed(file, flags):
+    try:
+        return original(file,flags)
+    except BlockingIOError:
+        marker.touch()
+        while not released.exists():
+            time.sleep(0.01)
+        raise
+background.fcntl.flock=observed
+raise SystemExit(background.run(Path(sys.argv[1]),1))
+"""
+    env = {**os.environ, "PYTHONPATH": os.environ.get("SOMA_TEST_SRC", str(Path("src").resolve()))}
+    runner = None
+    try:
+        with (tmp_path / "background.lock").open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            runner = subprocess.Popen(
+                [sys.executable, "-c", script, str(tmp_path), str(marker), str(released)],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            wait_for(marker.exists)
+        released.touch()
+
+        def started():
+            assert runner.poll() is None, runner.communicate()[1]
+            return json.loads(cli(tmp_path, "background", "status").stdout)["running"]
+
+        wait_for(started)
+    finally:
+        released.touch()
+        if runner:
+            runner.terminate()
+            runner.communicate(timeout=5)
