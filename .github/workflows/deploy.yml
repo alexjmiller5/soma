@@ -56,6 +56,8 @@ jobs:
       - name: Sync service secrets
         working-directory: worker
         run: |
-          bun -e 'import {profileSecrets} from "./src/enrollment-profile.js";const names=["CORS_ORIGINS","APNS_CONFIG","APNS_PRIVATE_KEY","ROW_CREATION_POLICIES","BACKUP_API_TOKEN","CAPTURE_ADAPTERS","DERIVATIONS"];const v=Object.fromEntries(names.map(n=>[n,process.env[n]]));Object.assign(v,profileSecrets(process.env.ENROLLMENT_PROFILES));process.stdout.write(JSON.stringify(v))' | bunx wrangler@4 secret bulk
+          bun -e 'import {profileSecrets} from "./src/enrollment-profile.js";const names=["APNS_CONFIG","APNS_PRIVATE_KEY","ROW_CREATION_POLICIES","BACKUP_API_TOKEN","CAPTURE_ADAPTERS","DERIVATIONS"];const v=Object.fromEntries(names.map(n=>[n,process.env[n]]));Object.assign(v,profileSecrets(process.env.ENROLLMENT_PROFILES));process.stdout.write(JSON.stringify(v))' | bunx wrangler@4 secret bulk
+      # Nonsecret configuration stays a variable; replacing an existing var with
+      # a same-named secret is rejected by Cloudflare.
       - working-directory: worker
-        run: bunx wrangler@4 deploy
+        run: bunx wrangler@4 deploy --var "CORS_ORIGINS:$CORS_ORIGINS"

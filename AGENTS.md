@@ -833,8 +833,8 @@ Subscriptions advertise `durable-pull-v1`; conditional row edits advertise
 falling back to an unconditional write.
 
 `CORS_ORIGINS` is a comma-separated list of exact browser origins from the
-owning ENV item, loaded and synced as a Worker secret on every deploy. No
-consumer hostname belongs in source defaults. Missing or empty configuration
+owning ENV item. The deploy workflow supplies it through Wrangler `--var` as a
+nonsecret Worker variable. No consumer hostname belongs in source defaults. Missing or empty configuration
 disables cross-origin browser reads; CORS does not replace bearer-token auth.
 
 Profile enrollment and projected reads are specified in `docs/scoped-enrollment.md`.

@@ -77,5 +77,6 @@ test('deployment delivers CORS origins from owning service configuration', async
   const workflow = await Bun.file(new URL('../../.github/workflows/deploy.yml', import.meta.url)).text();
   expect(workflow).toMatch(/^\s+CORS_ORIGINS: op:\/\/Soma\/Soma ENV\/CORS_ORIGINS$/m);
   const names = JSON.parse(workflow.match(/const names=(\[[^\]]+\])/)[1]);
-  expect(names).toContain('CORS_ORIGINS');
+  expect(names).not.toContain('CORS_ORIGINS');
+  expect(workflow).toContain('bunx wrangler@4 deploy --var "CORS_ORIGINS:$CORS_ORIGINS"');
 });
