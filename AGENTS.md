@@ -743,7 +743,9 @@ paging by `id`. `worker/test/pull.test.js` asserts both query plans - keep it
 green when touching the pull SQL. The hub also owns provenance slice indexes
 on `(to_kind,rel,id)` and `(to_kind,rel,hub_at)`: full filtered pages keep
 ID order without sorting the whole slice, and incremental slices range-scan
-arrival time. They are ensured with the arrival indexes and remain unlogged.
+arrival time. Record-specific pulls use `(to_kind,to_ref,rel,asserted_by,id)` so they seek
+the entity instead of scanning the whole relation. These indexes are ensured
+with the arrival indexes and remain unlogged.
 
 **The pull cursor is `hub.cursor(tables)` (`max(hub_at)`) read BEFORE the pull
 loop, not after it**: the hub writes rows itself (derivations on push and on

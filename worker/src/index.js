@@ -355,6 +355,9 @@ async function ensureHubAtIndexes(db) {
       const cols = new Set((infos[provenance].results ?? []).map(c => c.name));
       if (["id", "to_kind", "rel"].every(c => cols.has(c))) {
         statements.push(db.prepare("CREATE INDEX IF NOT EXISTS provenance_slice_id ON provenance(to_kind,rel,id)"));
+        if (["to_ref", "asserted_by"].every(c => cols.has(c))) statements.push(
+          db.prepare("CREATE INDEX IF NOT EXISTS provenance_target_id ON provenance(to_kind,to_ref,rel,asserted_by,id)"),
+        );
         if (cols.has("hub_at")) statements.push(
           db.prepare("CREATE INDEX IF NOT EXISTS provenance_slice_hub_at ON provenance(to_kind,rel,hub_at)"),
         );

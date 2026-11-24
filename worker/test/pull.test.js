@@ -323,3 +323,18 @@ test("provenance slice pages use filter and cursor indexes without sorting full 
   query = seen.find(r => /^SELECT .* FROM "provenance" WHERE/.test(r.sql));
   expect(await plan(db, query)).toContain("provenance_slice_hub_at");
 });
+
+test("record-specific provenance pulls seek the target and retain ID paging", async () => {
+  const db = await seed();
+  await db.prepare("CREATE TABLE provenance (id TEXT PRIMARY KEY,to_kind TEXT,to_ref TEXT,rel TEXT,asserted_by TEXT,hub_at TEXT)").run();
+  const seen = capturing(db);
+  await ROUTES["/v1/rows/pull"]({
+    table:"provenance",columns:["id"],
+    where:{to_kind:"songs",to_ref:"recording",rel:"evidence_of",asserted_by:"reader"},
+    limit:200,
+  },db);
+  const query=seen.find(r=>/^SELECT .* FROM "provenance" WHERE/.test(r.sql));
+  const detail=await plan(db,query);
+  expect(detail).toContain("provenance_target_id (to_kind=? AND to_ref=? AND rel=? AND asserted_by=?)");
+  expect(detail).not.toContain("TEMP B-TREE");
+});
