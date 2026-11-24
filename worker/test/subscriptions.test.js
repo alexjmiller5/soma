@@ -293,6 +293,11 @@ test.each(['hub_at','rowid','_rowid_','oid'])('schema replay cannot add revision
   db.db.exec('ALTER TABLE articles DROP COLUMN hub_at; CREATE TABLE _schema_log(id INTEGER PRIMARY KEY,applied_at TEXT,ddl TEXT)');
   db.db.exec(canonicalClock);
   await createSubscription(db,config);
+  const prepare=db.prepare.bind(db);
+  db.prepare=sql=>{
+    if (/^ALTER TABLE articles ADD COLUMN/i.test(sql)) throw new Error('reserved DDL reached SQLite');
+    return prepare(sql);
+  };
   const response=await ROUTES['/v1/schema/push']({entries:[{applied_at:'2026-10-03T00:00:00.000Z',ddl:`ALTER TABLE articles ADD COLUMN "${column.toUpperCase()}" TEXT`}]},db);
   expect(response.status).toBe(409);
   expect(db.db.query('PRAGMA table_info(articles)').all().some(c=>c.name.toLowerCase()===column)).toBe(false);

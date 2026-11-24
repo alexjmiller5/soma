@@ -84,6 +84,9 @@ export async function applySubscriptionSchema(db,ddl) {
   const addition=/^\s*ALTER\s+TABLE\s+(?:"([A-Za-z_][A-Za-z0-9_]*)"|([A-Za-z_][A-Za-z0-9_]*))\s+ADD\s+(?:COLUMN\s+)?(?:"([A-Za-z_][A-Za-z0-9_]*)"|([A-Za-z_][A-Za-z0-9_]*))\s+(?:TEXT|INTEGER|REAL|BLOB)\s*;?\s*$/i.exec(ddl);
   // Rowid aliases affect timestamp triggers; hub_at changes revision shape.
   const reserved=addition && ['rowid','_rowid_','oid','hub_at'].includes((addition[3]??addition[4]).toLowerCase());
+  if(reserved && [...watched].some(name=>name.toLowerCase()===(addition[1]??addition[2]).toLowerCase())) {
+    throw Object.assign(new Error('subscription schema conflict'),{code:'subscription-schema-conflict'});
+  }
   const addedTable=addition && !reserved && [...watched].find(name=>!name.startsWith('_') && name.toLowerCase()===(addition[1]??addition[2]).toLowerCase());
   if(addedTable) await view.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").bind(addedTable).first();
   // A column rename follows into the subscriptions selecting it, once each has
