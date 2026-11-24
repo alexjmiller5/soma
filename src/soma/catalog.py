@@ -1648,7 +1648,8 @@ def push_history(conn, table, row, before, events, now, batch=None):
 def valid_edit_timestamp(value) -> bool:
     """Protocol metadata, even for a table with no catalog."""
     if not isinstance(value, str) or not re.fullmatch(
-        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z", value
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z",
+        value,
     ):
         return False
     try:
