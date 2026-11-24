@@ -347,13 +347,20 @@ async function ensureHubAtIndexes(db) {
   if (names.length) {
     const infos = await db.batch(names.map((n) => db.prepare(`PRAGMA table_info(${qident(n)})`)));
     const stamped = names.filter((_, i) => (infos[i].results ?? []).some((c) => c.name === "hub_at"));
-    if (stamped.length) {
-      await db.batch(
-        stamped.map((n) =>
-          db.prepare(`CREATE INDEX IF NOT EXISTS ${qident(`${n}_hub_at`)} ON ${qident(n)} (hub_at)`),
-        ),
-      );
+    const statements = stamped.map((n) =>
+      db.prepare(`CREATE INDEX IF NOT EXISTS ${qident(`${n}_hub_at`)} ON ${qident(n)} (hub_at)`),
+    );
+    const provenance = names.indexOf("provenance");
+    if (provenance >= 0) {
+      const cols = new Set((infos[provenance].results ?? []).map(c => c.name));
+      if (["id", "to_kind", "rel"].every(c => cols.has(c))) {
+        statements.push(db.prepare("CREATE INDEX IF NOT EXISTS provenance_slice_id ON provenance(to_kind,rel,id)"));
+        if (cols.has("hub_at")) statements.push(
+          db.prepare("CREATE INDEX IF NOT EXISTS provenance_slice_hub_at ON provenance(to_kind,rel,hub_at)"),
+        );
+      }
     }
+    if (statements.length) await db.batch(statements);
   }
   indexed.add(db);
 }

@@ -740,7 +740,10 @@ overage in one billing period). The incremental paginated pull must range-scan
 that index: it writes `+id > ?` / `ORDER BY +id` so the planner cannot pick the
 primary key and filter `hub_at` row by row; a full pull (`since = ''`) keeps
 paging by `id`. `worker/test/pull.test.js` asserts both query plans - keep it
-green when touching the pull SQL.
+green when touching the pull SQL. The hub also owns provenance slice indexes
+on `(to_kind,rel,id)` and `(to_kind,rel,hub_at)`: full filtered pages keep
+ID order without sorting the whole slice, and incremental slices range-scan
+arrival time. They are ensured with the arrival indexes and remain unlogged.
 
 **The pull cursor is `hub.cursor(tables)` (`max(hub_at)`) read BEFORE the pull
 loop, not after it**: the hub writes rows itself (derivations on push and on

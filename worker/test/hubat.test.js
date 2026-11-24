@@ -363,5 +363,5 @@ test("a fresh isolate ensures every hub_at index in batches", async () => {
   expect(singles).toBe(1); // the table list; everything per-table is batched
   expect(batches).toBe(4); // table_info + create index, the arrival-column probe, then the cursor
   const made = await prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE '%_hub_at'").all();
-  expect(made.results.map((r) => r.name).sort()).toEqual(["catalog_properties_hub_at", "people_hub_at", "provenance_hub_at"]);
+  expect(made.results.map((r) => r.name).sort()).toEqual(["catalog_properties_hub_at", "people_hub_at", "provenance_hub_at", "provenance_slice_hub_at"]);
 });

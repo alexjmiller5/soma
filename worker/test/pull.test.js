@@ -297,3 +297,29 @@ test("a batch stops at the byte budget after at least one row and resumes from t
   expect(huge.batch).toHaveLength(1);
   expect(huge.batch[0].next_cursor).toBe("b0");
 });
+
+test("provenance slice pages use filter and cursor indexes without sorting full slices", async () => {
+  const db = await seed();
+  await db.prepare("CREATE TABLE provenance (id TEXT PRIMARY KEY,to_kind TEXT,to_ref TEXT,field TEXT,rel TEXT,asserted_by TEXT,updated_at TEXT,hub_at TEXT)").run();
+  await db.prepare("CREATE INDEX provenance_to ON provenance(to_kind,to_ref,field)").run();
+  for (const id of ["b", "a", "c"]) {
+    await db.prepare("INSERT INTO provenance (id,to_kind,rel,asserted_by,updated_at,hub_at) VALUES (?,'songs','evidence_of','reader',?,?)")
+      .bind(id, OLD, STAMP).run();
+  }
+  const seen = capturing(db);
+  const body = {
+    table: "provenance", columns: ["id"],
+    where: { to_kind: "songs", rel: "evidence_of", asserted_by: "reader" }, limit: 2,
+  };
+  expect(await ROUTES["/v1/rows/pull"](body, db)).toEqual({
+    rows: [{ id: "a" }, { id: "b" }], next_cursor: "b",
+  });
+  let query = seen.find(r => /^SELECT .* FROM "provenance" WHERE/.test(r.sql));
+  const full = await plan(db, query);
+  expect(full).toContain("provenance_slice_id");
+  expect(full).not.toContain("TEMP B-TREE");
+  seen.length = 0;
+  await ROUTES["/v1/rows/pull"]({ ...body, since: STAMP, after: "a" }, db);
+  query = seen.find(r => /^SELECT .* FROM "provenance" WHERE/.test(r.sql));
+  expect(await plan(db, query)).toContain("provenance_slice_hub_at");
+});
