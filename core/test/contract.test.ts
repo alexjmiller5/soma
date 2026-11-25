@@ -130,12 +130,20 @@ precondition((try? JSONDecoder().decode(CoreCreationOccurrenceKey.self, from: Da
 precondition((try? JSONDecoder().decode(CoreCreationOccurrenceKey.self, from: Data("9007199254740992".utf8))) == nil)
 precondition((try? JSONEncoder().encode(CoreCreationOccurrenceKey.integer(9_007_199_254_740_992))) == nil)
 `);
-    const build=Bun.spawn(['swiftc',source,main,'-o',executable],{stdout:'pipe',stderr:'pipe'});
-    const errors=await new Response(build.stderr).text();
-    expect({code:await build.exited,errors}).toEqual({code:0,errors:''});
+    // Match the other Swift contract tests: cold Linux Foundation compilation
+    // needs its own bounded deadline, longer than an ordinary unit test.
+    const build=Bun.spawn(['swiftc','-module-cache-path',resolve(temp,'cache'),source,main,'-o',executable],{stdout:'pipe',stderr:'pipe'});
+    const deadline=setTimeout(()=>build.kill(),150_000);
+    try{
+      const errors=await new Response(build.stderr).text();
+      expect({code:await build.exited,errors}).toEqual({code:0,errors:''});
+    }finally{
+      clearTimeout(deadline);
+      if(build.exitCode===null)build.kill();
+    }
     expect(await Bun.spawn([executable],{stdout:'pipe',stderr:'pipe'}).exited).toBe(0);
   }finally{await rm(temp,{recursive:true,force:true});}
-},30000);
+},180_000);
 
 test('integer occurrence unions preserve numeric identity and enforce safe integer bounds',()=>{
   const {swift,typescript}=generateContract(contract);
